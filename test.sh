@@ -7,7 +7,11 @@ cd $DIR
 source ./setup.sh
 
 # *** build ***
-scons -j8
+if [ ! -d "$DIR/builddir" ]; then
+  echo "Setting up meson build directory..."
+  meson setup builddir
+fi
+meson compile -C builddir
 
 # *** lint ***
 # TODO: pre-commit is slow; replace it with openpilot's "op lint"

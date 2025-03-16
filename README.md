@@ -45,7 +45,7 @@ cd opendbc
 
 # here are the individual commands it runs
 pip3 install -e .[testing,docs]  # install dependencies
-scons -j8                        # build with 8 cores
+meson compile -C builddir        # build with meson
 pytest .                         # run the tests
 pre-commit run --all-files       # run the linter
 ```

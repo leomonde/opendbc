@@ -12,12 +12,13 @@ urls = { "homepage" = "https://github.com/commaai/opendbc" }
 # setuptools includes distutils which is needed by Cython and pre-commit.
 # distutils was removed in python3.12 from the standard library.
 dependencies = [
-  "scons",
+  "meson",
+  "ninja",
   "numpy",
   "Cython",
   "crcmod",
   "tqdm",
-  "pycapnp",
+  "pycapnp", 
   "setuptools",
   "pycryptodome",
 ]
