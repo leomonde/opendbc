@@ -8,7 +8,7 @@ except ImportError:
 from opendbc.car.lateral import apply_std_steer_angle_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.volvo import volvocan
-from opendbc.car.volvo.values import CarControllerParams, SteerDirection
+from opendbc.car.volvo.values import CarControllerParams, LongMode, SteerDirection
 from opendbc.sunnypilot.car.volvo.icbm import IntelligentCruiseButtonManagementInterface
 
 
@@ -47,6 +47,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # fwd_hook blocks stock FSM3/FSM1 when controls_allowed && !gas_pressed, relay at 50Hz.
     self.next_long_tx_nanos = 0
     self.LONG_TX_PERIOD_NANOS = 20_000_000  # 50Hz, matching stock FSM3/FSM1
+
+    self.long_mode = LongMode.COAST
+    self.accel = 0.0
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -135,7 +138,17 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         next_tx = now_nanos + self.LONG_TX_PERIOD_NANOS
       self.next_long_tx_nanos = next_tx
 
-      accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
+      # OP long: OP owns accel, mode and traction; otherwise relay the camera's request
+      if CC.longActive:
+        accel = min(max(actuators.accel, CarControllerParams.ACCEL_MIN), CarControllerParams.ACCEL_MAX)
+        self.long_mode = volvocan.next_long_mode(self.long_mode, accel)
+        long_mode = self.long_mode
+      else:
+        accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
+        self.long_mode = LongMode.COAST
+        long_mode = None
+      self.accel = accel
+
       if self.sng_ack_frames > 0:
         acc_check = 1
         self.sng_ack_frames -= 1
@@ -143,7 +156,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         acc_check = int(CS.stock_FSM3["ACC_Check"])
 
       can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, False))
-      can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check))
+      can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check, long_mode))
 
     # Refresh custom ACC step every 100 frames and forward to carstate so that
     # _pending_delta emits exactly one synthetic event per physical ACC step.
@@ -160,6 +173,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     new_actuators = actuators.as_builder()
     new_actuators.steeringAngleDeg = self.apply_steer_prev
+    if CC.longActive:
+      new_actuators.accel = self.accel
 
     self.frame += 1
     return new_actuators, can_sends

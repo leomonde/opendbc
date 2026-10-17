@@ -32,7 +32,11 @@ class CarInterface(CarInterfaceBase):
     ret.steerActuatorDelay = 0.2
     ret.steerLimitTimer = 0.8
 
-    ret.openpilotLongitudinalControl = False
+    # OP long: stock ACC still engages and owns the set speed (pcmCruise); OP replaces FSM3 accel/mode/traction
+    ret.alphaLongitudinalAvailable = True
+    ret.openpilotLongitudinalControl = alpha_long
+    if ret.openpilotLongitudinalControl:
+      ret.longitudinalActuatorDelay = 0.5  # FSM3 accel request -> aEgo, ~0.6s in stock routes 807/808
 
     return ret
 

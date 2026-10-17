@@ -20,6 +20,14 @@ class SteerDirection(IntEnum):
   BOTH = 3
 
 
+class LongMode(IntEnum):
+  """FSM3 Byte_2 bits[1:0], longitudinal mode chosen by the stock camera.
+  ECM applies hydraulic brake only in BRAKE (routes 807/808: 0 brake frames in COAST/DRIVE)."""
+  BRAKE = 0
+  COAST = 1
+  DRIVE = 2
+
+
 class CarControllerParams:
   ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(90,
     ([0., 5., 15.], [5., .8, .15]),
@@ -33,6 +41,13 @@ class CarControllerParams:
 
   ACCEL_MIN = -4.0  # m/s^2
   ACCEL_MAX = 2.0   # m/s^2
+
+  # LongMode hysteresis on OP accel, tuned on stock camera route 808 (87% mode agreement).
+  # COAST alone reaches ~-0.3 m/s^2 at -0.45 request (engine braking), so BRAKE starts below that.
+  BRAKE_ENTER = -0.50  # m/s^2
+  BRAKE_EXIT = -0.15
+  DRIVE_ENTER = 0.08
+  DRIVE_EXIT = 0.04
 
   def __init__(self, CP):
     pass
