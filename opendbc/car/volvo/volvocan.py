@@ -108,9 +108,27 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | N
   return packer.make_can_msg("FSM3", 0, values)
 
 
-def create_radar(packer, stock_fsm1, long_active):
-  # pass stock FSM1 verbatim; spoofing ACC_Distance=255 caused stock ACC to disengage below 30 km/h
-  _ = long_active  # kept for signature stability
+def fsm4_brake_byte(accel: float, mode: LongMode) -> int:
+  # FSM4 Byte_5: 0xF0 | level when braking (bit6 = hydraulic brake request), 0xB0 | level otherwise
+  CCP = CarControllerParams
+  brake = mode == LongMode.BRAKE
+  levels, default = (CCP.FSM4_BRAKE_LEVELS, 0x4) if brake else (CCP.FSM4_NO_BRAKE_LEVELS, 0x5)
+  level = next((lvl for limit, lvl in levels if accel < limit), default)
+  return (0xF0 if brake else 0xB0) | level
+
+
+def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None):
+  # relay one stock FSM4 per camera frame (Byte_0 alternates 0x55/0xAA in runs of 3-4, so no duplicates).
+  # With mode (OP long), own Byte_5 so the ECM's hydraulic brake follows OP and not the camera.
+  values = {s: stock_fsm4[s] for s in ("Byte_0", "Byte_1", "Byte_2", "ACC_LeadSpeed", "Byte_4", "Byte_5", "Byte_6", "Byte_7")}
+  if mode is not None:
+    values["Byte_5"] = fsm4_brake_byte(accel, mode)
+  return packer.make_can_msg("FSM4", 0, values)
+
+
+def create_radar(packer, stock_fsm1, mode: LongMode | None = None):
+  # pass stock FSM1 verbatim; spoofing ACC_Distance=255 caused stock ACC to disengage below 30 km/h.
+  # With mode (OP long), Byte_2 bit2 follows OP braking (camera sets it in BRAKE: 0xB8->0xBC data, 0x00->0x04 type).
   values = {s: stock_fsm1[s] for s in (
     "ACC_Distance",
     "Byte_1",
@@ -121,4 +139,6 @@ def create_radar(packer, stock_fsm1, long_active):
     "Byte_6",
     "Byte_7",
   )}
+  if mode is not None:
+    values["Byte_2"] = (int(stock_fsm1["Byte_2"]) & ~0x04) | (0x04 if mode == LongMode.BRAKE else 0)
   return packer.make_can_msg("FSM1", 0, values)

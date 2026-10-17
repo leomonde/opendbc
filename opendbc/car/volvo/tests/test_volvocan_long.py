@@ -93,3 +93,47 @@ def test_mode_hysteresis():
   assert m == LongMode.BRAKE
   m = volvocan.next_long_mode(m, 1.0)
   assert m == LongMode.DRIVE
+
+
+FSM4 = 0x31A
+FSM1 = 0x260
+# stock camera frames, route 00000808 (ACC engaged)
+STOCK_FSM4 = ["aaf1343a8ef24600", "aaf15e5e8af3cb00", "aaf173748ab40b00", "aaf173738ab3f800"]  # Byte_5 0xF2/0xF3 brake, 0xB4/0xB3 not
+STOCK_FSM1 = ["ffffb80049e37408", "5ad4bc0049e37408", "46ff000000e31408", "23f4040000e31408"]  # Byte_2 data 0xB8/0xBC, type 0x00/0x04
+
+
+def parse(name: str, addr: int, freq: int, dat: bytes) -> dict:
+  cp = CANParser(DBC, [(name, freq)], 0)
+  cp.update([(0, [(addr, dat, 0)])])
+  return copy.copy(cp.vl[name])
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_FSM4])
+def test_fsm4_relay_is_byte_identical(stock):
+  assert volvocan.create_fsm4(CANPacker(DBC), parse("FSM4", FSM4, 33, stock), 0.0)[1] == stock
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_FSM4])
+@pytest.mark.parametrize("accel,mode,byte5", [
+  (-3.5, LongMode.BRAKE, 0xF0), (-2.5, LongMode.BRAKE, 0xF1), (-1.5, LongMode.BRAKE, 0xF2), (-0.6, LongMode.BRAKE, 0xF3),
+  (0.0, LongMode.BRAKE, 0xF4), (-0.2, LongMode.COAST, 0xB3), (0.3, LongMode.DRIVE, 0xB4), (1.2, LongMode.DRIVE, 0xB5),
+])
+def test_fsm4_op_owns_only_brake_byte(stock, accel, mode, byte5):
+  # levels match the stock camera's Byte_5 per accel (808): F0 -3.5, F1 -2.5, F2 -1.5, F3 -0.6, F4 0; B3/B4/B5 when not braking
+  out = volvocan.create_fsm4(CANPacker(DBC), parse("FSM4", FSM4, 33, stock), accel, mode)[1]
+  assert out[5] == byte5
+  assert bool(out[5] & 0x40) == (mode == LongMode.BRAKE)
+  assert out[:5] == stock[:5] and out[6:] == stock[6:]
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_FSM1])
+def test_fsm1_relay_is_byte_identical(stock):
+  assert volvocan.create_radar(CANPacker(DBC), parse("FSM1", FSM1, 50, stock))[1] == stock
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_FSM1])
+@pytest.mark.parametrize("mode", list(LongMode))
+def test_fsm1_brake_bit_follows_op(stock, mode):
+  out = volvocan.create_radar(CANPacker(DBC), parse("FSM1", FSM1, 50, stock), mode)[1]
+  assert out[2] == (stock[2] & ~0x04) | (0x04 if mode == LongMode.BRAKE else 0)
+  assert out[:2] == stock[:2] and out[3:] == stock[3:]

@@ -12,6 +12,7 @@
 #define VOLVO_EUCD_FSM1          0x260  // TX by OP, ACC radar/distance message (oplong)
 #define VOLVO_EUCD_FSM2          0x262  // TX by OP, LKA command
 #define VOLVO_EUCD_FSM3          0x270  // TX by OP, ACC accel request + status
+#define VOLVO_EUCD_FSM4          0x31A  // TX by OP, ACC lead/brake status (Byte_5 bit6 = hydraulic brake request)
 
 // CAN bus numbers.
 #define VOLVO_MAIN_BUS 0U
@@ -156,6 +157,8 @@ static safety_config volvo_init(uint16_t param) {
     // causes ECM fault (~30s, drive 27). Stock flows untouched; OP's later TX wins via last-message-wins.
     {VOLVO_EUCD_FSM1,      VOLVO_MAIN_BUS, 8, .check_relay = false},
     {VOLVO_EUCD_FSM3,      VOLVO_MAIN_BUS, 8, .check_relay = false},
+    // FSM4: always blocked cam->main and relayed 1:1 by OP (Byte_0 alternates in runs, duplicates must be avoided)
+    {VOLVO_EUCD_FSM4,      VOLVO_MAIN_BUS, 8, .check_relay = true},
   };
 
   // TODO: add counters

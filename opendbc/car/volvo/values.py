@@ -49,6 +49,11 @@ class CarControllerParams:
   DRIVE_ENTER = 0.08
   DRIVE_EXIT = 0.04
 
+  # FSM4 Byte_5 low nibble vs accel, from stock camera (808). ECM applies the hydraulic brake only
+  # with Byte_5 bit6 set (route 80e: 0 brake frames without it, even with FSM3 in BRAKE).
+  FSM4_BRAKE_LEVELS = ((-3.0, 0x0), (-2.0, 0x1), (-1.1, 0x2), (-0.1, 0x3))  # (accel below, nibble), else 0x4
+  FSM4_NO_BRAKE_LEVELS = ((0.05, 0x3), (0.9, 0x4))  # else 0x5
+
   def __init__(self, CP):
     pass
 

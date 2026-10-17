@@ -113,6 +113,9 @@ class CarState(CarStateBase):
     self.stock_FSM1 = copy.copy(cam_cp.vl["FSM1"])
     self.stock_FSM3 = copy.copy(cam_cp.vl["FSM3"])
     self.ACC_Check = cam_cp.vl["FSM3"]["ACC_Check"]
+    # every camera FSM4 received this cycle, relayed 1:1 by carcontroller (panda always blocks the camera's)
+    fsm4_all = cam_cp.vl_all["FSM4"]
+    self.stock_FSM4_frames = [dict(zip(fsm4_all.keys(), vals, strict=True)) for vals in zip(*fsm4_all.values(), strict=True)]
 
     # TSR speed limit from camera (0 = no sign)
     tsr_raw = cam_cp.vl["FSM5"]["TSR_Speed"]
@@ -139,6 +142,7 @@ class CarState(CarStateBase):
       ("FSM0", 100),
       ("FSM1", 50),
       ("FSM3", 50),
+      ("FSM4", 33),
       ("FSM5", 10),
     ]
 

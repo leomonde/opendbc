@@ -11,11 +11,11 @@ from opendbc.safety.tests.common import CANPackerSafety
 
 class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
 
-  TX_MSGS = [[0x127, 0], [0x260, 0], [0x262, 0], [0x270, 0], [0x246, 2]]
+  TX_MSGS = [[0x127, 0], [0x260, 0], [0x262, 0], [0x270, 0], [0x31A, 0], [0x246, 2]]
   GAS_PRESSED_THRESHOLD = 10
   STANDSTILL_THRESHOLD = 0.1
-  RELAY_MALFUNCTION_ADDRS = {0: [0x262], 2: [0x246]}
-  FWD_BLACKLISTED_ADDRS = {2: [0x262], 0: [0x246]}
+  RELAY_MALFUNCTION_ADDRS = {0: [0x262, 0x31A], 2: [0x246]}
+  FWD_BLACKLISTED_ADDRS = {2: [0x262, 0x31A], 0: [0x246]}
 
   VOLVO_MAIN_BUS = 0
   #VOLVO_AUX_BUS = 1

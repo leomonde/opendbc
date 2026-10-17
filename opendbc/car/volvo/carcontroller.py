@@ -155,8 +155,13 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       else:
         acc_check = int(CS.stock_FSM3["ACC_Check"])
 
-      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, False))
+      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, long_mode))
       can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check, long_mode))
+
+    # FSM4: relay each camera frame 1:1 (panda always blocks the camera's); with OP long, OP owns the brake flag
+    fsm4_mode = self.long_mode if CC.longActive else None
+    for stock_fsm4 in CS.stock_FSM4_frames:
+      can_sends.append(volvocan.create_fsm4(self.packer_pt, stock_fsm4, self.accel, fsm4_mode))
 
     # Refresh custom ACC step every 100 frames and forward to carstate so that
     # _pending_delta emits exactly one synthetic event per physical ACC step.
