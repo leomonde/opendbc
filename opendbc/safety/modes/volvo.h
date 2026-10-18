@@ -12,6 +12,8 @@
 #define VOLVO_EUCD_PSCM1         0x246  // TX by OP to camera, PSCM state
 #define VOLVO_EUCD_BRAKE_LEVEL   0x133  // TX by OP to camera, ABS brake level (masked while OP brakes)
 #define VOLVO_EUCD_BRAKE_ACK     0x323  // TX by OP to camera, ECM brake request acknowledge (masked while OP brakes)
+#define VOLVO_EUCD_WHEELSPEED1   0x220  // TX by OP to camera, rear wheel speeds + brake request active (masked while OP brakes)
+#define VOLVO_EUCD_BRAKE_REQ_ACK 0x299  // TX by OP to camera, brake request acknowledge (masked while OP brakes)
 #define VOLVO_EUCD_FSM1          0x260  // TX by OP, ACC radar/distance message (oplong)
 #define VOLVO_EUCD_FSM2          0x262  // TX by OP, LKA command
 #define VOLVO_EUCD_FSM3          0x270  // TX by OP, ACC accel request + status
@@ -171,6 +173,8 @@ static safety_config volvo_init(uint16_t param) {
     // car brake response to the camera: always blocked main->cam and relayed 1:1 by OP, masked while OP brakes
     {VOLVO_EUCD_BRAKE_LEVEL, VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_BRAKE_ACK,   VOLVO_CAM_BUS, 8, .check_relay = true},
+    {VOLVO_EUCD_WHEELSPEED1, VOLVO_CAM_BUS, 8, .check_relay = true},
+    {VOLVO_EUCD_BRAKE_REQ_ACK, VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_FSM2,      VOLVO_MAIN_BUS, 8, .check_relay = true},   // OP replaces stock LKA command
     // FSM1/FSM3: check_relay=false — ECM validates a rolling counter; passthrough delay
     // causes ECM fault (~30s, drive 27). Stock flows untouched; OP's later TX wins via last-message-wins.

@@ -199,6 +199,31 @@ def test_133_mask_holds_brake_level(stock):
   assert out[0] == stock[0] and out[2:] == stock[2:]
 
 
+MSG_220 = 0x220
+MSG_299 = 0x299
+# stock car frames, route 00000816: 0x220 Byte_2 0xE0 / 0xE4 (brake request active); 0x299 Byte_5 0xFF / 0xF7 (acknowledge)
+STOCK_220 = ["8b11e000a2577a30", "8b11e400a245a216", "8b11e500a1f6a1d3"]
+STOCK_299 = ["40054c020dff2235", "4005480201f72239"]
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_220])
+@pytest.mark.parametrize("mask", [False, True])
+def test_220_relay_to_camera(stock, mask):
+  addr, dat, bus = volvocan.create_cam_wheel_status(CANPacker(DBC), parse("wheelspeed1", MSG_220, 50, stock), mask)
+  assert (addr, bus) == (MSG_220, 2)
+  assert dat[2] == (stock[2] & ~0x04 if mask else stock[2])  # 0xE4 -> 0xE0, 0xE5 -> 0xE1
+  assert dat[:2] == stock[:2] and dat[3:] == stock[3:]
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_299])
+@pytest.mark.parametrize("mask", [False, True])
+def test_299_relay_to_camera(stock, mask):
+  addr, dat, bus = volvocan.create_cam_brake_request_ack(CANPacker(DBC), parse("NEW_MSG_299", MSG_299, 50, stock), mask)
+  assert (addr, bus) == (MSG_299, 2)
+  assert dat[5] == (stock[5] | 0x08 if mask else stock[5])  # 0xF7 -> 0xFF
+  assert dat[:5] == stock[:5] and dat[6:] == stock[6:]
+
+
 FSM0 = 0x51
 # camera frames, route 00000816: before (ACC enabled, no lead) and after its abort (0x82, code 0x10, Byte_7 bit2)
 FSM0_OK = bytes.fromhex("15e3860091955f7a")

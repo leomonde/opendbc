@@ -174,6 +174,22 @@ def create_cam_brake_level(packer, stock_133, frozen_level: int | None):
   return packer.make_can_msg("NEW_MSG_133", CANBUS.cam, values)
 
 
+def create_cam_wheel_status(packer, stock_220, mask: bool):
+  # relay 0x220 (wheelspeed1) to the camera; masked: Byte_2 bit2 (brake request active, 0xE0 -> 0xE4) cleared
+  values = {s: stock_220[s] for s in BYTES}
+  if mask:
+    values["Byte_2"] = int(stock_220["Byte_2"]) & ~0x04
+  return packer.make_can_msg("wheelspeed1", CANBUS.cam, values)
+
+
+def create_cam_brake_request_ack(packer, stock_299, mask: bool):
+  # relay 0x299 to the camera; masked: Byte_5 bit3 (brake request acknowledge, active low: 0xFF -> 0xF7) set again
+  values = {s: stock_299[s] for s in BYTES}
+  if mask:
+    values["Byte_5"] = int(stock_299["Byte_5"]) | 0x08
+  return packer.make_can_msg("NEW_MSG_299", CANBUS.cam, values)
+
+
 def create_radar(packer, stock_fsm1, mode: LongMode | None = None):
   # pass stock FSM1 verbatim; spoofing ACC_Distance=255 caused stock ACC to disengage below 30 km/h.
   # With mode (OP long), Byte_2 bit2 follows OP braking (camera sets it in BRAKE: 0xB8->0xBC data, 0x00->0x04 type).

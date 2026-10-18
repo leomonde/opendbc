@@ -202,7 +202,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       good_byte2 = self.fsm4_good_byte2 if self.op_owns_acc else None
       can_sends.append(volvocan.create_fsm4(self.packer_pt, stock_fsm4, self.accel, fsm4_mode, good_byte2))
 
-    # Car -> camera brake response (0x133, 0x323): relay 1:1 (panda always blocks the car's), masked while OP brakes
+    # Car -> camera brake response (0x133, 0x323, 0x220, 0x299): relay 1:1 (panda always blocks the car's), masked while OP brakes
     # and the camera does not, so the camera does not see a brake it never asked for and abort ACC
     if self.cam_brake:
       self.cam_mask_frames = 0
@@ -217,6 +217,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       can_sends.append(volvocan.create_cam_brake_level(self.packer_pt, stock_133, self.brake_level_133 if mask else None))
     for stock_323 in CS.stock_323_frames:
       can_sends.append(volvocan.create_cam_brake_status(self.packer_pt, stock_323, mask))
+    for stock_220 in CS.stock_220_frames:
+      can_sends.append(volvocan.create_cam_wheel_status(self.packer_pt, stock_220, mask))
+    for stock_299 in CS.stock_299_frames:
+      can_sends.append(volvocan.create_cam_brake_request_ack(self.packer_pt, stock_299, mask))
 
     # Refresh custom ACC step every 100 frames and forward to carstate so that
     # _pending_delta emits exactly one synthetic event per physical ACC step.

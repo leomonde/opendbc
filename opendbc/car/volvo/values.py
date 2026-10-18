@@ -54,8 +54,9 @@ class CarControllerParams:
   # ~1 count per frame, so it must come from OP's accel, not mixed with the camera's Byte_6 (routes 812/814: ACC fault).
   FSM4_BRAKE_ACCEL_BP = [-3.5, -2.5, -1.75, -1.25, -0.8, -0.45, -0.2, 0.0, 0.2]
   FSM4_BRAKE_VALUE_V = [12519, 12850, 12964, 13073, 13143, 13227, 13279, 13328, 13378]
-  # Brake response the camera sees (car -> camera relay): the ECM/ABS answer a FSM4 brake request in 0x323 Byte_4 bit4
-  # and 0x133 Byte_1 (routes 812/814/815, even without pressure); seeing that without having asked, the camera aborts
+  # Brake response the camera sees (car -> camera relay): the ECM/ABS answer a FSM4 brake request in 0x323 Byte_4 bit4,
+  # 0x133 Byte_1, 0x220 Byte_2 bit2 and 0x299 Byte_5 bit3 (routes 812/814/815/816, even without pressure; in stock 808
+  # 0x299 0xF7 only ever follows the camera's own request, 30-180 ms later); seeing that without having asked, the camera aborts
   # ACC ~1.5 s later (FSM0 Byte_3 0x10). Masked while OP brakes and the camera does not, and this long after.
   CAM_BRAKE_MASK_HOLD_FRAMES = int(1.0 / DT_CTRL)
   FSM4_NO_BRAKE_ACCEL_BP = [-0.45, -0.2, 0.0, 0.2, 0.45, 0.8, 1.5]
