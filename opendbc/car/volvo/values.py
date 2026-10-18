@@ -42,6 +42,11 @@ class CarControllerParams:
   ACCEL_MIN = -4.0  # m/s^2
   ACCEL_MAX = 2.0   # m/s^2
 
+  # Keep the ECM engaged with OP's FSM0/FSM3/FSM4 after the camera aborts ACC. Off: in route 822 it held the ECM
+  # engaged for 38 s with the camera's ACC off; after the ECM disengaged the camera latched a fault (FSM0 Byte_3 0x04,
+  # ACC unavailable) for the rest of the drive, with OP off too.
+  OP_OWNS_ACC_AFTER_CAMERA_ABORT = False
+
   # LongMode hysteresis on OP accel, tuned on stock camera route 808 (87% mode agreement).
   # COAST alone reaches ~-0.3 m/s^2 at -0.45 request (engine braking), so BRAKE starts below that.
   BRAKE_ENTER = -0.50  # m/s^2

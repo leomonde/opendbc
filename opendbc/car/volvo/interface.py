@@ -37,6 +37,10 @@ class CarInterface(CarInterfaceBase):
     ret.openpilotLongitudinalControl = alpha_long
     if ret.openpilotLongitudinalControl:
       ret.longitudinalActuatorDelay = 0.5  # FSM3 accel request -> aEgo, ~0.6s in stock routes 807/808
+      # the car delivers ~70% of the requested decel (route 821: -1.1 asked, -0.8 measured) and stopped 1.7 m behind
+      # the lead; integral on the accel error closes that gap (no proportional term, the ECM has its own loop)
+      ret.longitudinalTuning.kiBP = [0.]
+      ret.longitudinalTuning.kiV = [0.5]
 
     return ret
 

@@ -142,8 +142,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # FSM0: relay each camera frame 1:1 (panda always blocks the camera's). With OP long the camera aborts its ACC
     # function ~1.5 s after OP brakes for something it did not see (routes 812-816). The ECM is the ACC master
     # (EngineData leads FSM0), so once the camera was enabled in this engagement, OP keeps owning ACC while the
-    # driver keeps the ECM engaged, instead of passing on the camera's abort. The safety only allows FSM0 with ACC
-    # enabled while the ECM is engaged.
+    # driver keeps the ECM engaged, instead of passing on the camera's abort (off by default, see
+    # OP_OWNS_ACC_AFTER_CAMERA_ABORT). The safety only allows FSM0 with ACC enabled while the ECM is engaged.
     ecm_engaged = CS.ecm_acc_engaged
     if not ecm_engaged:
       self.cam_was_enabled = False
@@ -152,8 +152,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       if cam_ok:
         self.fsm0_good = stock_fsm0
         self.cam_was_enabled = self.cam_was_enabled or ecm_engaged
-      self.op_owns_acc = (self.CP.openpilotLongitudinalControl and CC.enabled and ecm_engaged and
-                          self.cam_was_enabled and not cam_ok)
+      self.op_owns_acc = (CarControllerParams.OP_OWNS_ACC_AFTER_CAMERA_ABORT and self.CP.openpilotLongitudinalControl and
+                          CC.enabled and ecm_engaged and self.cam_was_enabled and not cam_ok)
       can_sends.append(volvocan.create_fsm0(self.packer_pt, stock_fsm0, ecm_engaged, self.fsm0_good if self.op_owns_acc else None))
     if not (ecm_engaged and CC.enabled):
       self.op_owns_acc = False
@@ -171,10 +171,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         next_tx = now_nanos + self.LONG_TX_PERIOD_NANOS
       self.next_long_tx_nanos = next_tx
 
-      # OP long: OP owns accel, mode and traction; otherwise relay the camera's request
+      # OP long: OP owns accel, mode and traction; otherwise relay the camera's request.
+      # When the camera asks for the hydraulic brake (FSM4 Byte_5 bit6), OP keeps it and may only brake harder: the
+      # camera aborts ACC ~1.5 s after its brake request goes unanswered by the car (route 822, FSM0 Byte_3 0x10).
+      if CS.stock_FSM4_frames:
+        self.cam_brake = bool(int(CS.stock_FSM4_frames[-1]["Byte_5"]) & 0x40)
       if CC.longActive:
         accel = min(max(actuators.accel, CarControllerParams.ACCEL_MIN), CarControllerParams.ACCEL_MAX)
-        self.long_mode = volvocan.next_long_mode(self.long_mode, accel)
+        if self.cam_brake:
+          accel = min(accel, float(CS.stock_FSM3["ACC_AccelerationRequest"]))
+          self.long_mode = LongMode.BRAKE
+        else:
+          self.long_mode = volvocan.next_long_mode(self.long_mode, accel)
         long_mode = self.long_mode
       else:
         accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
@@ -194,6 +202,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check, long_mode, good_fsm3))
 
     # FSM4: relay each camera frame 1:1 (panda always blocks the camera's); with OP long, OP owns the brake flag
+    # (set whenever OP or the camera brakes, see FSM3 above)
     fsm4_mode = self.long_mode if CC.longActive else None
     for stock_fsm4 in CS.stock_FSM4_frames:
       self.cam_brake = bool(int(stock_fsm4["Byte_5"]) & 0x40)
