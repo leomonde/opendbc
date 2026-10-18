@@ -941,6 +941,10 @@ class SafetyTest(SafetyTestBase):
               # exceptions for common msgs across different hondas
               tx = list(filter(lambda m: m[0] not in [0x1FA, 0x30C, 0x33D, 0x33DB], tx))
 
+            # Volvo FSM0 (ACC state, relayed by OP) overlaps a Hyundai CAN FD message
+            if attr.startswith('TestHyundaiCanfd') and current_test.startswith('TestVolvo'):
+              tx = list(filter(lambda m: m[0] not in [0x51, ], tx))
+
             if attr.startswith('TestHyundaiLongitudinal'):
               # exceptions for common msgs across different Hyundai CAN platforms
               tx = list(filter(lambda m: m[0] not in [0x420, 0x50A, 0x389, 0x4A2], tx))

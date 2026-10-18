@@ -85,10 +85,12 @@ def fsm3_traction(accel: float, mode: LongMode) -> int:
   return min(max(round(57 * accel - 15), -127), -1) & 0xFF
 
 
-def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | None = None):
+def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | None = None, good_fsm3=None):
   # pass stock FSM3 verbatim except ACC_AccelerationRequest and ACC_Check; bit flip faults ECU (drive 27).
   # With mode (OP long), also own Byte_2 bits[1:0] (LongMode) and Byte_3 (traction). Byte_2 upper bits
   # stay stock so the data (0xD4) / type (0x00) frame cadence of the camera is kept.
+  # With good_fsm3 (OP owns ACC after the camera's abort), the camera's abort marks (Byte_0 0xAB, Byte_2 0xFC,
+  # Byte_6 0x01) are replaced by the last frame before the abort.
   values = {s: stock_fsm3[s] for s in (
     "ACC_Standstill",
     "Byte_01",
@@ -107,6 +109,11 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | N
   if mode is not None:
     values["Byte_2"] = (int(stock_fsm3["Byte_2"]) & 0xFC) | int(mode)
     values["Byte_3"] = fsm3_traction(accel, mode)
+  if good_fsm3 is not None:
+    values |= {s: good_fsm3[s] for s in ("ACC_Standstill", "Byte_01", "Byte_02")}
+    base = 0xD4 if int(stock_fsm3["Byte_4"]) == 0x81 else 0x00  # data / type frame
+    values["Byte_2"] = base | (int(mode) if mode is not None else int(good_fsm3["Byte_2"]) & 0x03)
+    values["Byte_6"] = 0
   return packer.make_can_msg("FSM3", 0, values)
 
 
@@ -117,7 +124,7 @@ def fsm4_brake_value(accel: float, brake: bool) -> int:
   return 0x8000 | (0x4000 if brake else 0) | int(round(float(np.interp(accel, bp, v))))
 
 
-def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None):
+def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None, good_byte2: int | None = None):
   # relay one stock FSM4 per camera frame (Byte_0 alternates 0x55/0xAA in runs of 3-4, so no duplicates).
   # With mode (OP long), the ECM's hydraulic brake follows OP: Byte_5/Byte_6 come from OP's accel when OP brakes,
   # or when the camera brakes and OP does not; otherwise they stay the camera's.
@@ -128,7 +135,24 @@ def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None):
     value = fsm4_brake_value(accel, op_brake)
     values["Byte_5"] = value >> 8
     values["Byte_6"] = value & 0xFF
+  if good_byte2 is not None:  # OP owns ACC after the camera's abort: its Byte_2 goes to 0xFC
+    values["Byte_2"] = good_byte2
   return packer.make_can_msg("FSM4", 0, values)
+
+
+def create_fsm0(packer, stock_fsm0, ecm_engaged: bool, good_fsm0=None):
+  # relay one camera FSM0 per frame (panda always blocks the camera's). The ECM is the ACC master (it leads FSM0 by
+  # 35-60 ms in stock routes); FSM0 never reports ACC enabled when the ECM is not engaged (enforced by the safety too).
+  # With good_fsm0, OP owns ACC (OP long engaged, camera's ACC function aborted): keep the state before the abort
+  # instead of the camera's (Byte_2 0x86/0x87 -> 0x82, Byte_3 0x10, Byte_7 bit2).
+  values = {s: stock_fsm0[s] for s in BYTES}
+  if good_fsm0 is not None:
+    values["Byte_2"] = (int(good_fsm0["Byte_2"]) & ~0x01) | (int(stock_fsm0["Byte_2"]) & 0x01)  # FrontCar stays live
+    values["Byte_3"] = good_fsm0["Byte_3"]
+    values["Byte_7"] = int(stock_fsm0["Byte_7"]) & ~0x04
+  if not ecm_engaged:
+    values["Byte_2"] = int(values["Byte_2"]) & ~0x04
+  return packer.make_can_msg("FSM0", 0, values)
 
 
 BYTES = tuple(f"Byte_{i}" for i in range(8))

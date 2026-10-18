@@ -11,11 +11,11 @@ from opendbc.safety.tests.common import CANPackerSafety
 
 class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
 
-  TX_MSGS = [[0x127, 0], [0x260, 0], [0x262, 0], [0x270, 0], [0x31A, 0], [0x246, 2], [0x133, 2], [0x323, 2]]
+  TX_MSGS = [[0x051, 0], [0x127, 0], [0x260, 0], [0x262, 0], [0x270, 0], [0x31A, 0], [0x246, 2], [0x133, 2], [0x323, 2]]
   GAS_PRESSED_THRESHOLD = 10
   STANDSTILL_THRESHOLD = 0.1
-  RELAY_MALFUNCTION_ADDRS = {0: [0x262, 0x31A], 2: [0x246, 0x133, 0x323]}
-  FWD_BLACKLISTED_ADDRS = {2: [0x262, 0x31A], 0: [0x246, 0x133, 0x323]}
+  RELAY_MALFUNCTION_ADDRS = {0: [0x051, 0x262, 0x31A], 2: [0x246, 0x133, 0x323]}
+  FWD_BLACKLISTED_ADDRS = {2: [0x051, 0x262, 0x31A], 0: [0x246, 0x133, 0x323]}
 
   VOLVO_MAIN_BUS = 0
   #VOLVO_AUX_BUS = 1
@@ -48,8 +48,26 @@ class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     return self.packer.make_can_msg_safety("PSCM1", self.VOLVO_MAIN_BUS, values)
 
   def _pcm_status_msg(self, enable):
-    values = {"ACC_Enabled": 1 if enable else 0}
-    return self.packer.make_can_msg_safety("FSM0", self.VOLVO_CAM_BUS, values)
+    # engagement comes from the ECM (EngineData), not from the camera's FSM0
+    values = {"ACC_Engaged_ECM": 1 if enable else 0}
+    return self.packer.make_can_msg_safety("EngineData", self.VOLVO_MAIN_BUS, values)
+
+  def _fsm0_msg(self, acc_enabled: bool):
+    values = {"ACC_Enabled": 1 if acc_enabled else 0, "ACC_Available": 1}
+    return self.packer.make_can_msg_safety("FSM0", self.VOLVO_MAIN_BUS, values)
+
+  def test_fsm0_acc_enabled_only_with_ecm_engaged(self):
+    # OP relays FSM0 to the car; it must never report ACC enabled while the ECM is not engaged
+    for ecm_engaged in (False, True):
+      self._rx(self._pcm_status_msg(ecm_engaged))
+      self.assertTrue(self._tx(self._fsm0_msg(False)))
+      self.assertEqual(ecm_engaged, self._tx(self._fsm0_msg(True)), f"{ecm_engaged=}")
+
+  def test_camera_fsm0_does_not_engage(self):
+    # the camera's FSM0 is not an engagement source anymore
+    self.safety.set_controls_allowed(False)
+    self._rx(self.packer.make_can_msg_safety("FSM0", self.VOLVO_CAM_BUS, {"ACC_Enabled": 1}))
+    self.assertFalse(self.safety.get_controls_allowed())
 
   def _speed_msg(self, speed: float):
     values = {"VehicleSpeed": speed * 3.6}

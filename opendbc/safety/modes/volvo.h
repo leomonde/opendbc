@@ -4,7 +4,8 @@
 
 // Safety-relevant CAN messages for EUCD platform.
 #define VOLVO_EUCD_AccPedal      0x020  // RX, gas pedal
-#define VOLVO_EUCD_FSM0          0x051  // RX from FSM, cruise state
+#define VOLVO_EUCD_FSM0          0x051  // TX by OP (camera's relayed 1:1), ACC state; blocked both ways (main->cam in fwd hook)
+#define VOLVO_EUCD_EngineData    0x12A  // RX, ECM ACC engaged (the ECM is the ACC master, it leads FSM0)
 #define VOLVO_EUCD_VehicleSpeed1 0x148  // RX, vehicle speed
 #define VOLVO_EUCD_Brake_Info    0x20a  // RX, driver brake pressed
 #define VOLVO_EUCD_CCButtons     0x127  // TX by OP, CC buttons
@@ -49,10 +50,11 @@ static void volvo_rx_hook(const CANPacket_t *msg) {
       int angle_meas_new = ROUND(((angle_raw * 0.0447f) - 1465.0f) * 100.0f);
       update_sample(&angle_meas, angle_meas_new);
     }
-  } else if (msg->bus == VOLVO_CAM_BUS) {
-    if (addr == VOLVO_EUCD_FSM0) {
-      // Signal: ACC_Enabled (bit 2 of byte 2, from ACCStatus == 6 || 7)
-      bool cruise_engaged = (GET_BYTES(msg, 2, 1) & 0x04U) != 0U;
+
+    if (addr == VOLVO_EUCD_EngineData) {
+      // Signal: ACC_Engaged_ECM (bit 4 of byte 4). Engagement comes from the ECM, which the driver engages with the
+      // CC buttons; the camera's FSM0 only follows it (and OP replaces FSM0).
+      bool cruise_engaged = (GET_BYTES(msg, 4, 1) & 0x10U) != 0U;
       pcm_cruise_check(cruise_engaged);
     }
   } else {
@@ -97,6 +99,12 @@ static bool volvo_tx_hook(const CANPacket_t *msg) {
     // if cancel button is pressed when cruise isn't engaged.
     violation |= !cruise_engaged_prev && (GET_BIT(msg, 59U) || !(GET_BIT(msg, 43U)));  // Signals: ACCOnOffBtn, ACCOnOffBtnInv (cancel)
     violation |= !controls_allowed && (GET_BIT(msg, 61U) || !(GET_BIT(msg, 45U)));  // Signals: ACCResumeBtn, ACCResumeBtnInv (resume)
+  }
+
+  // FSM0 from OP may report ACC enabled only while the ECM is engaged, so OP can never engage ACC by itself.
+  if (addr == VOLVO_EUCD_FSM0) {
+    bool acc_enabled = (GET_BYTES(msg, 2, 1) & 0x04U) != 0U;
+    violation |= acc_enabled && !cruise_engaged_prev;
   }
 
   // Safety check for Lane Keep Assist action.
@@ -145,6 +153,12 @@ static bool volvo_fwd_hook(int bus_num, int addr) {
       block_msg = true;  // OP relays via create_radar/create_longitudinal
     }
   }
+  // FSM0: never forwarded main->cam, so the camera only sees its own FSM0 (cam->main is already blocked by
+  // check_relay on MAIN_BUS). Done here and not with check_relay on CAM_BUS: the camera transmits FSM0 on bus 2,
+  // which would trip the relay malfunction check.
+  if (((unsigned int)bus_num == VOLVO_MAIN_BUS) && (addr == VOLVO_EUCD_FSM0)) {
+    block_msg = true;
+  }
   return block_msg;
 }
 
@@ -164,12 +178,16 @@ static safety_config volvo_init(uint16_t param) {
     {VOLVO_EUCD_FSM3,      VOLVO_MAIN_BUS, 8, .check_relay = false},
     // FSM4: always blocked cam->main and relayed 1:1 by OP (Byte_0 alternates in runs, duplicates must be avoided)
     {VOLVO_EUCD_FSM4,      VOLVO_MAIN_BUS, 8, .check_relay = true},
+    // FSM0: always blocked cam->main and relayed 1:1 by OP; ACC enabled only with the ECM engaged (tx hook).
+    // Also blocked main->cam in the fwd hook (not via check_relay on CAM_BUS, the camera sends FSM0 there).
+    {VOLVO_EUCD_FSM0,      VOLVO_MAIN_BUS, 8, .check_relay = true},
   };
 
   // TODO: add counters
   static RxCheck volvo_eucd_rx_checks[] = {
     {.msg = {{VOLVO_EUCD_AccPedal,      VOLVO_MAIN_BUS, 8, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true, .frequency = 100U}, { 0 }, { 0 }}},
     {.msg = {{VOLVO_EUCD_FSM0,          VOLVO_CAM_BUS,  8, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true, .frequency = 100U}, { 0 }, { 0 }}},
+    {.msg = {{VOLVO_EUCD_EngineData,    VOLVO_MAIN_BUS, 8, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true, .frequency = 67U}, { 0 }, { 0 }}},
     {.msg = {{VOLVO_EUCD_VehicleSpeed1, VOLVO_MAIN_BUS, 8, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true, .frequency = 50U}, { 0 }, { 0 }}},
     {.msg = {{VOLVO_EUCD_Brake_Info,    VOLVO_MAIN_BUS, 8, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true, .frequency = 50U}, { 0 }, { 0 }}},
     {.msg = {{VOLVO_EUCD_PSCM1,         VOLVO_MAIN_BUS, 8, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true, .frequency = 50U}, { 0 }, { 0 }}},  // steering angle meas
