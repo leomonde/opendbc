@@ -155,7 +155,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       else:
         acc_check = int(CS.stock_FSM3["ACC_Check"])
 
-      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, long_mode))
+      # FSM1 Byte_2 bit2 stays the camera's for now: with it and FSM4 bit6 both from OP, the camera aborted ACC
+      # ~1.5 s after OP braked (routes 812/814, FSM0 Byte_3 0x10). Test FSM4 bit6 alone to tell which one causes it.
+      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1))
       can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check, long_mode))
 
     # FSM4: relay each camera frame 1:1 (panda always blocks the camera's); with OP long, OP owns the brake flag

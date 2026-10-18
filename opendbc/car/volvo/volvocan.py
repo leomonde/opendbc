@@ -1,3 +1,5 @@
+import numpy as np
+
 from opendbc.car.volvo.values import CarControllerParams, LongMode
 
 
@@ -108,21 +110,24 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | N
   return packer.make_can_msg("FSM3", 0, values)
 
 
-def fsm4_brake_byte(accel: float, mode: LongMode) -> int:
-  # FSM4 Byte_5: 0xF0 | level when braking (bit6 = hydraulic brake request), 0xB0 | level otherwise
+def fsm4_brake_value(accel: float, brake: bool) -> int:
+  # FSM4 Byte_5/Byte_6 16-bit value for OP's accel: 0x8000 | (0x4000 if brake) | 14-bit decel target
   CCP = CarControllerParams
-  brake = mode == LongMode.BRAKE
-  levels, default = (CCP.FSM4_BRAKE_LEVELS, 0x4) if brake else (CCP.FSM4_NO_BRAKE_LEVELS, 0x5)
-  level = next((lvl for limit, lvl in levels if accel < limit), default)
-  return (0xF0 if brake else 0xB0) | level
+  bp, v = (CCP.FSM4_BRAKE_ACCEL_BP, CCP.FSM4_BRAKE_VALUE_V) if brake else (CCP.FSM4_NO_BRAKE_ACCEL_BP, CCP.FSM4_NO_BRAKE_VALUE_V)
+  return 0x8000 | (0x4000 if brake else 0) | int(round(float(np.interp(accel, bp, v))))
 
 
 def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None):
   # relay one stock FSM4 per camera frame (Byte_0 alternates 0x55/0xAA in runs of 3-4, so no duplicates).
-  # With mode (OP long), own Byte_5 so the ECM's hydraulic brake follows OP and not the camera.
+  # With mode (OP long), the ECM's hydraulic brake follows OP: Byte_5/Byte_6 come from OP's accel when OP brakes,
+  # or when the camera brakes and OP does not; otherwise they stay the camera's.
   values = {s: stock_fsm4[s] for s in ("Byte_0", "Byte_1", "Byte_2", "ACC_LeadSpeed", "Byte_4", "Byte_5", "Byte_6", "Byte_7")}
-  if mode is not None:
-    values["Byte_5"] = fsm4_brake_byte(accel, mode)
+  op_brake = mode == LongMode.BRAKE
+  cam_brake = bool(int(stock_fsm4["Byte_5"]) & 0x40)
+  if mode is not None and (op_brake or cam_brake):
+    value = fsm4_brake_value(accel, op_brake)
+    values["Byte_5"] = value >> 8
+    values["Byte_6"] = value & 0xFF
   return packer.make_can_msg("FSM4", 0, values)
 
 

@@ -113,17 +113,44 @@ def test_fsm4_relay_is_byte_identical(stock):
   assert volvocan.create_fsm4(CANPacker(DBC), parse("FSM4", FSM4, 33, stock), 0.0)[1] == stock
 
 
+def fsm4(stock: bytes, accel: float, mode) -> bytes:
+  return volvocan.create_fsm4(CANPacker(DBC), parse("FSM4", FSM4, 33, stock), accel, mode)[1]
+
+
 @pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_FSM4])
-@pytest.mark.parametrize("accel,mode,byte5", [
-  (-3.5, LongMode.BRAKE, 0xF0), (-2.5, LongMode.BRAKE, 0xF1), (-1.5, LongMode.BRAKE, 0xF2), (-0.6, LongMode.BRAKE, 0xF3),
-  (0.0, LongMode.BRAKE, 0xF4), (-0.2, LongMode.COAST, 0xB3), (0.3, LongMode.DRIVE, 0xB4), (1.2, LongMode.DRIVE, 0xB5),
-])
-def test_fsm4_op_owns_only_brake_byte(stock, accel, mode, byte5):
-  # levels match the stock camera's Byte_5 per accel (808): F0 -3.5, F1 -2.5, F2 -1.5, F3 -0.6, F4 0; B3/B4/B5 when not braking
-  out = volvocan.create_fsm4(CANPacker(DBC), parse("FSM4", FSM4, 33, stock), accel, mode)[1]
-  assert out[5] == byte5
-  assert bool(out[5] & 0x40) == (mode == LongMode.BRAKE)
-  assert out[:5] == stock[:5] and out[6:] == stock[6:]
+@pytest.mark.parametrize("accel", [-3.5, -2.0, -1.0, -0.6, -0.1])
+def test_fsm4_op_brake_sets_value_from_accel(stock, accel):
+  out = fsm4(stock, accel, LongMode.BRAKE)
+  value = (out[5] << 8) | out[6]
+  assert value == volvocan.fsm4_brake_value(accel, True)
+  assert value & 0xC000 == 0xC000  # bit15 always, bit14 = hydraulic brake request
+  assert out[:5] == stock[:5] and out[7:] == stock[7:]
+
+
+def test_fsm4_brake_value_matches_stock_levels():
+  # high byte reproduces the stock camera Byte_5 levels: F0 at -3.5, F4 near 0 (808)
+  assert volvocan.fsm4_brake_value(-3.5, True) >> 8 == 0xF0
+  assert volvocan.fsm4_brake_value(0.0, True) >> 8 == 0xF4
+  values = [volvocan.fsm4_brake_value(a / 10, True) for a in range(-40, 5)]
+  assert values == sorted(values)  # stronger decel, lower value
+  # smooth like stock (~1 count/frame): a 0.02 m/s^2 step moves it by a few counts, never a byte jump
+  assert all(abs(volvocan.fsm4_brake_value(a / 50, True) - volvocan.fsm4_brake_value((a + 1) / 50, True)) < 16 for a in range(-200, 10))
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_FSM4[2:]])
+@pytest.mark.parametrize("mode", [LongMode.COAST, LongMode.DRIVE])
+def test_fsm4_no_brake_keeps_camera_value(stock, mode):
+  assert fsm4(stock, 0.3, mode) == stock
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_FSM4[:2]])
+@pytest.mark.parametrize("mode", [LongMode.COAST, LongMode.DRIVE])
+def test_fsm4_camera_brake_cleared_when_op_does_not_brake(stock, mode):
+  out = fsm4(stock, 0.3, mode)
+  value = (out[5] << 8) | out[6]
+  assert value == volvocan.fsm4_brake_value(0.3, False)
+  assert value & 0xC000 == 0x8000
+  assert out[:5] == stock[:5] and out[7:] == stock[7:]
 
 
 @pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_FSM1])

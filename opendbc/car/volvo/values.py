@@ -49,10 +49,13 @@ class CarControllerParams:
   DRIVE_ENTER = 0.08
   DRIVE_EXIT = 0.04
 
-  # FSM4 Byte_5 low nibble vs accel, from stock camera (808). ECM applies the hydraulic brake only
-  # with Byte_5 bit6 set (route 80e: 0 brake frames without it, even with FSM3 in BRAKE).
-  FSM4_BRAKE_LEVELS = ((-3.0, 0x0), (-2.0, 0x1), (-1.1, 0x2), (-0.1, 0x3))  # (accel below, nibble), else 0x4
-  FSM4_NO_BRAKE_LEVELS = ((0.05, 0x3), (0.9, 0x4))  # else 0x5
+  # FSM4 Byte_5/Byte_6 = 16-bit value: bit15 always set, bit14 = hydraulic brake request (ECM brakes only with it,
+  # route 80e), bits 13..0 = decel target. Mean 14-bit value vs accel from the stock camera (808); stock changes it by
+  # ~1 count per frame, so it must come from OP's accel, not mixed with the camera's Byte_6 (routes 812/814: ACC fault).
+  FSM4_BRAKE_ACCEL_BP = [-3.5, -2.5, -1.75, -1.25, -0.8, -0.45, -0.2, 0.0, 0.2]
+  FSM4_BRAKE_VALUE_V = [12519, 12850, 12964, 13073, 13143, 13227, 13279, 13328, 13378]
+  FSM4_NO_BRAKE_ACCEL_BP = [-0.45, -0.2, 0.0, 0.2, 0.45, 0.8, 1.5]
+  FSM4_NO_BRAKE_VALUE_V = [13276, 13299, 13318, 13338, 13333, 13377, 13449]
 
   def __init__(self, CP):
     pass
