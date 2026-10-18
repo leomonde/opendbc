@@ -164,3 +164,36 @@ def test_fsm1_brake_bit_follows_op(stock, mode):
   out = volvocan.create_radar(CANPacker(DBC), parse("FSM1", FSM1, 50, stock), mode)[1]
   assert out[2] == (stock[2] & ~0x04) | (0x04 if mode == LongMode.BRAKE else 0)
   assert out[:2] == stock[:2] and out[3:] == stock[3:]
+
+
+MSG_323 = 0x323
+MSG_133 = 0x133
+# stock car frames, route 00000807: 0x323 Byte_4 0xC5 normal / 0xD5 brake acknowledge / 0xE5; 0x133 Byte_1 0x14 / 0x2D (braking)
+STOCK_323 = ["0000fc04c5800400", "0000fc04d5800400", "0000fc04e5800400"]
+STOCK_133 = ["0b146e3cce370719", "0b2d6df6cdf60732"]
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_323])
+def test_323_relay_to_camera(stock):
+  addr, dat, bus = volvocan.create_cam_brake_status(CANPacker(DBC), parse("NEW_MSG_323", MSG_323, 25, stock), False)
+  assert (addr, dat, bus) == (MSG_323, stock, 2)
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_323])
+def test_323_mask_clears_brake_ack(stock):
+  out = volvocan.create_cam_brake_status(CANPacker(DBC), parse("NEW_MSG_323", MSG_323, 25, stock), True)[1]
+  assert out[4] == stock[4] & ~0x10  # 0xD5 -> 0xC5, others unchanged
+  assert out[:4] == stock[:4] and out[5:] == stock[5:]
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_133])
+def test_133_relay_to_camera(stock):
+  addr, dat, bus = volvocan.create_cam_brake_level(CANPacker(DBC), parse("NEW_MSG_133", MSG_133, 50, stock), None)
+  assert (addr, dat, bus) == (MSG_133, stock, 2)
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_133])
+def test_133_mask_holds_brake_level(stock):
+  out = volvocan.create_cam_brake_level(CANPacker(DBC), parse("NEW_MSG_133", MSG_133, 50, stock), 0x14)[1]
+  assert out[1] == (stock[1] & 0x80) | 0x14
+  assert out[0] == stock[0] and out[2:] == stock[2:]

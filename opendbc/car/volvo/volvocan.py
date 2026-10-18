@@ -1,6 +1,6 @@
 import numpy as np
 
-from opendbc.car.volvo.values import CarControllerParams, LongMode
+from opendbc.car.volvo.values import CANBUS, CarControllerParams, LongMode
 
 
 def create_button_msg(packer, resume=False, cancel=False, set_plus=False, minus=False, bus=0):
@@ -129,6 +129,25 @@ def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None):
     values["Byte_5"] = value >> 8
     values["Byte_6"] = value & 0xFF
   return packer.make_can_msg("FSM4", 0, values)
+
+
+BYTES = tuple(f"Byte_{i}" for i in range(8))
+
+
+def create_cam_brake_status(packer, stock_323, mask: bool):
+  # relay 0x323 to the camera; masked: Byte_4 bit4 (ECM brake request acknowledge, 0xC5 -> 0xD5) cleared
+  values = {s: stock_323[s] for s in BYTES}
+  if mask:
+    values["Byte_4"] = int(stock_323["Byte_4"]) & ~0x10
+  return packer.make_can_msg("NEW_MSG_323", CANBUS.cam, values)
+
+
+def create_cam_brake_level(packer, stock_133, frozen_level: int | None):
+  # relay 0x133 to the camera; masked: Byte_1 bits 6..0 (ABS brake level) held at the value before OP braked
+  values = {s: stock_133[s] for s in BYTES}
+  if frozen_level is not None:
+    values["Byte_1"] = (int(stock_133["Byte_1"]) & 0x80) | (frozen_level & 0x7F)
+  return packer.make_can_msg("NEW_MSG_133", CANBUS.cam, values)
 
 
 def create_radar(packer, stock_fsm1, mode: LongMode | None = None):

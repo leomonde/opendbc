@@ -82,7 +82,14 @@ BO_ 298 EngineData: 8 XXX
  SG_ EngineRpm : 52|13@0+ (1,0) [0|8000] "" XXX
 
 BO_ 307 NEW_MSG_133: 8 XXX
- SG_ Brake : 14|7@0+ (1,0) [0|127] "" XXX
+ SG_ Byte_0 : 7|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_1 : 15|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_2 : 23|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_3 : 31|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_4 : 39|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_5 : 47|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_6 : 55|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_7 : 63|8@0+ (1,0) [0|255] "" XXX
 
 BO_ 328 VehicleSpeed1: 8 XXX
  SG_ BrakePressure2 : 33|10@0+ (1,0) [0|63] "" XXX
@@ -196,6 +203,16 @@ BO_ 794 FSM4: 8 FSM
 
 BO_ 802 StartStop: 8 XXX
  SG_ StartStop : 8|1@0+ (1,0) [0|1] "" XXX
+
+BO_ 803 NEW_MSG_323: 8 XXX
+ SG_ Byte_0 : 7|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_1 : 15|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_2 : 23|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_3 : 31|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_4 : 39|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_5 : 47|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_6 : 55|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_7 : 63|8@0+ (1,0) [0|255] "" XXX
 
 BO_ 923 Accessories_01: 8 XXX
  SG_ NEW_SIGNAL_1 : 15|16@0+ (1,0) [0|65535] "" XXX

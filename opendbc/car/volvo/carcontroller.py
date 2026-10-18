@@ -50,6 +50,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     self.long_mode = LongMode.COAST
     self.accel = 0.0
+    self.cam_brake = False
+    self.cam_mask_frames = 0
+    self.brake_level_133 = 0
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -163,7 +166,24 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # FSM4: relay each camera frame 1:1 (panda always blocks the camera's); with OP long, OP owns the brake flag
     fsm4_mode = self.long_mode if CC.longActive else None
     for stock_fsm4 in CS.stock_FSM4_frames:
+      self.cam_brake = bool(int(stock_fsm4["Byte_5"]) & 0x40)
       can_sends.append(volvocan.create_fsm4(self.packer_pt, stock_fsm4, self.accel, fsm4_mode))
+
+    # Car -> camera brake response (0x133, 0x323): relay 1:1 (panda always blocks the car's), masked while OP brakes
+    # and the camera does not, so the camera does not see a brake it never asked for and abort ACC
+    if self.cam_brake:
+      self.cam_mask_frames = 0
+    elif CC.longActive and self.long_mode == LongMode.BRAKE:
+      self.cam_mask_frames = CarControllerParams.CAM_BRAKE_MASK_HOLD_FRAMES
+    elif self.cam_mask_frames > 0:
+      self.cam_mask_frames -= 1
+    mask = self.cam_mask_frames > 0
+    for stock_133 in CS.stock_133_frames:
+      if not mask:
+        self.brake_level_133 = int(stock_133["Byte_1"]) & 0x7F
+      can_sends.append(volvocan.create_cam_brake_level(self.packer_pt, stock_133, self.brake_level_133 if mask else None))
+    for stock_323 in CS.stock_323_frames:
+      can_sends.append(volvocan.create_cam_brake_status(self.packer_pt, stock_323, mask))
 
     # Refresh custom ACC step every 100 frames and forward to carstate so that
     # _pending_delta emits exactly one synthetic event per physical ACC step.

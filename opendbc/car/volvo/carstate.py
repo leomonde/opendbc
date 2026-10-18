@@ -8,6 +8,11 @@ from opendbc.car import Bus, structs
 ButtonType = structs.CarState.ButtonEvent.Type
 
 
+def all_frames(cp: CANParser, name: str) -> list[dict[str, float]]:
+  sigs = cp.vl_all[name]
+  return [dict(zip(sigs.keys(), vals, strict=True)) for vals in zip(*sigs.values(), strict=True)]
+
+
 class CarState(CarStateBase):
   def __init__(self, CP, CP_SP):
     super().__init__(CP, CP_SP)
@@ -113,9 +118,11 @@ class CarState(CarStateBase):
     self.stock_FSM1 = copy.copy(cam_cp.vl["FSM1"])
     self.stock_FSM3 = copy.copy(cam_cp.vl["FSM3"])
     self.ACC_Check = cam_cp.vl["FSM3"]["ACC_Check"]
-    # every camera FSM4 received this cycle, relayed 1:1 by carcontroller (panda always blocks the camera's)
-    fsm4_all = cam_cp.vl_all["FSM4"]
-    self.stock_FSM4_frames = [dict(zip(fsm4_all.keys(), vals, strict=True)) for vals in zip(*fsm4_all.values(), strict=True)]
+    # every frame received this cycle of the messages the panda always blocks and carcontroller relays 1:1:
+    # camera FSM4 to the car, and the car's brake response (0x133, 0x323) to the camera
+    self.stock_FSM4_frames = all_frames(cam_cp, "FSM4")
+    self.stock_133_frames = all_frames(pt_cp, "NEW_MSG_133")
+    self.stock_323_frames = all_frames(pt_cp, "NEW_MSG_323")
 
     # TSR speed limit from camera (0 = no sign)
     tsr_raw = cam_cp.vl["FSM5"]["TSR_Speed"]
@@ -135,7 +142,9 @@ class CarState(CarStateBase):
       ("ACC_Speed", 50),
       ("MiscCarInfo", 25),
       ("Doors", 20),
-      ("SAS0", 100)
+      ("SAS0", 100),
+      ("NEW_MSG_133", 50),
+      ("NEW_MSG_323", 25),
     ]
 
     cam_messages = [
