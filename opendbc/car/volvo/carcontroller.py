@@ -42,6 +42,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.waiting = False
     self.sng_count = 0
     self.go_count = 0
+    self.op_resume_frames = 0
     self.sng_ack_frames = 0  # frames of FSM3 ACC_Check=1, so the ECM accepts OP's resume
 
     # FSM3/FSM1 sent at 50 Hz wall-clock
@@ -183,12 +184,16 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     actuators = CC.actuators
     at_standstill = CS.out.cruiseState.enabled and CS.out.cruiseState.standstill and CS.out.vEgo < 0.01
 
+    # openpilot's own lead (radar + camera) left: its resume request, held for SNG_OP_RESUME_TIME
+    self.op_resume_frames = self.op_resume_frames + 1 if CC.cruiseControl.resume else 0
+    op_resume = self.op_resume_frames * DT_CTRL >= CCP.SNG_OP_RESUME_TIME
+
     if (self.frame - self.last_resume_frame) * DT_CTRL > 1.00:
       if at_standstill and not self.waiting:
         self.distance = CS.acc_distance
         self.waiting = True
         self.sng_count = 0
-      if at_standstill and self.waiting and CS.acc_distance > self.distance:
+      if at_standstill and self.waiting and (CS.acc_distance > self.distance or op_resume):
         can_sends.extend(self.resume_burst())
         if self.sng_count == 0:
           self.sng_ack_frames = 25

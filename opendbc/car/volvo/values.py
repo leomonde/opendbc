@@ -53,6 +53,7 @@ class CarControllerParams:
   BLOCK_LEN = 8   # frames to block steering on a direction change
   DEADZONE = 0.2  # deg, keep the previous direction inside it
   BUTTON_BURST = 15  # frames per button press
+  SNG_OP_RESUME_TIME = 0.5  # s of openpilot's resume request before it triggers the SNG resume
 
   # Longitudinal limits
   ACCEL_MIN = -4.0  # m/s^2
@@ -87,8 +88,8 @@ class CarControllerParams:
   OP_BRAKE_OVERRIDE_ACCEL = -0.3  # m/s^2, OP brakes if it wants less than this and the camera does not brake
   OP_BRAKE_OVERRIDE_MARGIN = 1.0  # m/s^2, OP brakes if it wants this much more than the camera
 
-  # Red-light stop with no target
-  OP_STOPS_WITHOUT_TARGET = True
+  # Red-light stop with no target (off: the camera locked up, ACC unavailable for the drive)
+  OP_STOPS_WITHOUT_TARGET = False
   NO_TARGET_STOP_SPEED = 10. * CV.KPH_TO_MS  # hide the camera's no-target cancel below this
   STOPPING_FLAG_SPEED = 3.5 * CV.KPH_TO_MS   # FSM4 "stopping" flag below this
   NO_TARGET_STANDSTILL_DELAY = 2.5  # s stopped before FSM3 reports standstill
