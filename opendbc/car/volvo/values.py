@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 
 from opendbc.car import Bus, CarSpecs, DbcDict, PlatformConfig, Platforms, uds, DT_CTRL
+from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.lateral import AngleSteeringLimits
 from opendbc.car.docs_definitions import CarHarness, CarDocs, CarParts
 from opendbc.car.fw_query_definitions import FwQueryConfig, Request, p16
@@ -83,6 +84,12 @@ class CarControllerParams:
   # the lane while braking, where the stock ACC keeps braking hard behind it. Once the camera asks below
   # CAMERA_BRAKE_HONOR_BELOW during a brake request, OP honors it (min of both) until the camera releases the brake.
   OP_IGNORES_MILD_CAMERA_BRAKE = True
+  # OP stopping the car with no target (red light, experimental mode): the camera cancels ACC at ~2.5 km/h (FSM3
+  # Byte_2 bit5, route 827). Below NO_TARGET_STOP_SPEED OP hides that cancel from the ECM, and below STOPPING_FLAG_SPEED
+  # it sets the FSM4 "stopping" flag like the camera does behind a lead. OP keeps the hydraulic brake while stopped.
+  OP_STOPS_WITHOUT_TARGET = True
+  NO_TARGET_STOP_SPEED = 10. * CV.KPH_TO_MS
+  STOPPING_FLAG_SPEED = 3.5 * CV.KPH_TO_MS
   CAMERA_BRAKE_HONOR_BELOW = -2.0  # m/s^2
   FSM4_NO_BRAKE_ACCEL_BP = [-0.45, -0.2, 0.0, 0.2, 0.45, 0.8, 1.5]
   FSM4_NO_BRAKE_VALUE_V = [13276, 13299, 13318, 13338, 13333, 13377, 13449]

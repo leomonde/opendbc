@@ -53,6 +53,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.cam_brake = False
     self.cam_brake_honor = False
     self.spoof_cam_ack = False
+    self.op_stopping_slow = False
+    self.op_stopping_flag = False
     self.cam_mask_frames = 0
     self.brake_level_133 = 0
 
@@ -200,6 +202,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         self.cam_brake_honor = False
         long_mode = None
       self.accel = accel
+      # OP stopping the car slowly by itself (no target for the camera, e.g. red light): see OP_STOPS_WITHOUT_TARGET
+      self.op_stopping_slow = (CarControllerParams.OP_STOPS_WITHOUT_TARGET and CC.longActive and
+                               self.long_mode == LongMode.BRAKE and CS.out.vEgo < CarControllerParams.NO_TARGET_STOP_SPEED)
+      self.op_stopping_flag = self.op_stopping_slow and CS.out.vEgo < CarControllerParams.STOPPING_FLAG_SPEED
       # the car only acks a brake request OP sends: with OP not braking, the camera's ack has to be spoofed
       self.spoof_cam_ack = CC.longActive and self.cam_brake and not self.cam_brake_honor and self.long_mode != LongMode.BRAKE
 
@@ -212,7 +218,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       # FSM1 Byte_2 bit2 stays the camera's for now: with it and FSM4 bit6 both from OP, the camera aborted ACC
       # ~1.5 s after OP braked (routes 812/814, FSM0 Byte_3 0x10). Test FSM4 bit6 alone to tell which one causes it.
       can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1))
-      can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check, long_mode, good_fsm3))
+      can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check, long_mode, good_fsm3,
+                                                    hide_no_target_cancel=self.op_stopping_slow))
 
     # FSM4: relay each camera frame 1:1 (panda always blocks the camera's); with OP long, OP owns the brake flag
     # (set whenever OP or the camera brakes, see FSM3 above)
@@ -222,7 +229,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       if not self.op_owns_acc and int(stock_fsm4["Byte_2"]) != 0xFC:
         self.fsm4_good_byte2 = int(stock_fsm4["Byte_2"])
       good_byte2 = self.fsm4_good_byte2 if self.op_owns_acc else None
-      can_sends.append(volvocan.create_fsm4(self.packer_pt, stock_fsm4, self.accel, fsm4_mode, good_byte2))
+      can_sends.append(volvocan.create_fsm4(self.packer_pt, stock_fsm4, self.accel, fsm4_mode, good_byte2,
+                                            stopping=self.op_stopping_flag))
 
     # Car -> camera brake response (0x133, 0x323, 0x220, 0x299): relay 1:1 (panda always blocks the car's), masked while OP brakes
     # and the camera does not, so the camera does not see a brake it never asked for and abort ACC

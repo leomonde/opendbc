@@ -301,3 +301,23 @@ def test_299_spoofs_ack(stock):
   dat = volvocan.create_cam_brake_request_ack(CANPacker(DBC), parse("NEW_MSG_299", MSG_299, 50, stock), False, True)[1]
   assert dat[5] == stock[5] & ~0x08  # 0xFF -> 0xF7
   assert dat[:5] == stock[:5] and dat[6:] == stock[6:]
+
+
+# camera FSM3 when it cancels ACC with no target at 2.5 km/h (route 827): data 0xF5, type 0x21
+NO_TARGET_CANCEL = [bytes.fromhex("ea7ef5f481000000"), bytes.fromhex("407e21f400000000")]
+
+
+@pytest.mark.parametrize("stock", NO_TARGET_CANCEL)
+def test_fsm3_hides_no_target_cancel(stock):
+  fsm3 = parse_fsm3(stock)
+  out = volvocan.create_longitudinal(CANPacker(DBC), fsm3, -0.3, 0, LongMode.BRAKE, hide_no_target_cancel=True)[1]
+  assert out[2] == (stock[2] & 0xDC) | LongMode.BRAKE  # bit5 cleared: 0xD4 data / 0x00 type
+  out = volvocan.create_longitudinal(CANPacker(DBC), fsm3, -0.3, 0, LongMode.BRAKE)[1]
+  assert out[2] & 0x20  # passed on when not stopping
+
+
+def test_fsm4_stopping_flag():
+  stock = bytes.fromhex(STOCK_FSM4[0])
+  fsm4 = parse("FSM4", FSM4, 33, stock)
+  assert volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE, stopping=True)[1][1] == stock[1] | 0x08
+  assert volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE)[1][1] == stock[1]
