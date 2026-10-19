@@ -74,10 +74,9 @@ class CarControllerParams:
   CAM_BRAKE_MASK_HOLD_FRAMES = int(1.0 / DT_CTRL)
   # Which of those are masked. In stock 808, 0x299 and 0x220 appear only with the camera's own request (0% with driver
   # braking): they are the ack. 0x323 and 0x133 also appear with driver braking: brake applied. Route 816 (0x133+0x323
-  # only) still aborted; 821-824 (all four) did not; 825 (0x299+0x220, variant A) did not either, so 0x133/0x323 are not
-  # needed. Now testing 0x299 alone (variant B); if OP braking alone aborts (FSM0 Byte_3 0x10 ~1.5 s after BRAKE), go
-  # back to 0x299+0x220.
-  CAM_BRAKE_MASK_MSGS = frozenset({0x299})
+  # only) still aborted; 821-824 (all four) did not; 825 (0x299+0x220) did not either, so 0x133/0x323 are not needed;
+  # 826 (0x299 alone) aborted 1.55 s after OP braked alone, so the camera checks 0x220 too. Minimal set: 0x299+0x220.
+  CAM_BRAKE_MASK_MSGS = frozenset({0x220, 0x299})
   FSM4_NO_BRAKE_ACCEL_BP = [-0.45, -0.2, 0.0, 0.2, 0.45, 0.8, 1.5]
   FSM4_NO_BRAKE_VALUE_V = [13276, 13299, 13318, 13338, 13333, 13377, 13449]
 
