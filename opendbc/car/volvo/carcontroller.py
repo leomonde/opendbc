@@ -51,6 +51,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.long_mode = LongMode.COAST
     self.accel = 0.0
     self.cam_brake = False
+    self.cam_brake_honor = False
+    self.spoof_cam_ack = False
     self.cam_mask_frames = 0
     self.brake_level_133 = 0
 
@@ -172,14 +174,22 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       self.next_long_tx_nanos = next_tx
 
       # OP long: OP owns accel, mode and traction; otherwise relay the camera's request.
-      # When the camera asks for the hydraulic brake (FSM4 Byte_5 bit6), OP keeps it and may only brake harder: the
-      # camera aborts ACC ~1.5 s after its brake request goes unanswered by the car (route 822, FSM0 Byte_3 0x10).
+      # The camera aborts ACC ~1.5 s after its hydraulic brake request (FSM4 Byte_5 bit6) goes unanswered by the car
+      # (route 822, FSM0 Byte_3 0x10). OP either honors the request (min of both, BRAKE mode) or, for a mild one it
+      # does not share, keeps its own plan and spoofs the car's ack to the camera (OP_IGNORES_MILD_CAMERA_BRAKE).
       if CS.stock_FSM4_frames:
         self.cam_brake = bool(int(CS.stock_FSM4_frames[-1]["Byte_5"]) & 0x40)
       if CC.longActive:
         accel = min(max(actuators.accel, CarControllerParams.ACCEL_MIN), CarControllerParams.ACCEL_MAX)
-        if self.cam_brake:
-          accel = min(accel, float(CS.stock_FSM3["ACC_AccelerationRequest"]))
+        cam_accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
+        if not self.cam_brake:
+          self.cam_brake_honor = False
+        elif not self.cam_brake_honor:
+          # latched until the camera releases the brake, so OP does not flip between the two plans
+          self.cam_brake_honor = (not CarControllerParams.OP_IGNORES_MILD_CAMERA_BRAKE or
+                                  cam_accel < CarControllerParams.CAMERA_BRAKE_HONOR_BELOW)
+        if self.cam_brake_honor:
+          accel = min(accel, cam_accel)
           self.long_mode = LongMode.BRAKE
         else:
           self.long_mode = volvocan.next_long_mode(self.long_mode, accel)
@@ -187,8 +197,11 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       else:
         accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
         self.long_mode = LongMode.COAST
+        self.cam_brake_honor = False
         long_mode = None
       self.accel = accel
+      # the car only acks a brake request OP sends: with OP not braking, the camera's ack has to be spoofed
+      self.spoof_cam_ack = CC.longActive and self.cam_brake and not self.cam_brake_honor and self.long_mode != LongMode.BRAKE
 
       if self.sng_ack_frames > 0:
         acc_check = 1
@@ -228,10 +241,11 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       can_sends.append(volvocan.create_cam_brake_level(self.packer_pt, stock_133, self.brake_level_133 if mask_133 else None))
     for stock_323 in CS.stock_323_frames:
       can_sends.append(volvocan.create_cam_brake_status(self.packer_pt, stock_323, mask_323))
+    spoof_220, spoof_299 = (self.spoof_cam_ack and addr in masked for addr in (0x220, 0x299))
     for stock_220 in CS.stock_220_frames:
-      can_sends.append(volvocan.create_cam_wheel_status(self.packer_pt, stock_220, mask_220))
+      can_sends.append(volvocan.create_cam_wheel_status(self.packer_pt, stock_220, mask_220, spoof_220))
     for stock_299 in CS.stock_299_frames:
-      can_sends.append(volvocan.create_cam_brake_request_ack(self.packer_pt, stock_299, mask_299))
+      can_sends.append(volvocan.create_cam_brake_request_ack(self.packer_pt, stock_299, mask_299, spoof_299))
 
     # Refresh custom ACC step every 100 frames and forward to carstate so that
     # _pending_delta emits exactly one synthetic event per physical ACC step.

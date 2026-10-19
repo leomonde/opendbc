@@ -174,19 +174,25 @@ def create_cam_brake_level(packer, stock_133, frozen_level: int | None):
   return packer.make_can_msg("NEW_MSG_133", CANBUS.cam, values)
 
 
-def create_cam_wheel_status(packer, stock_220, mask: bool):
-  # relay 0x220 (wheelspeed1) to the camera; masked: Byte_2 bit2 (brake request active, 0xE0 -> 0xE4) cleared
+def create_cam_wheel_status(packer, stock_220, mask: bool, spoof: bool = False):
+  # relay 0x220 (wheelspeed1) to the camera; Byte_2 bit2 = brake request active (0xE0 -> 0xE4): masked clears it,
+  # spoofed sets it (the camera's own request, which OP does not pass to the car)
   values = {s: stock_220[s] for s in BYTES}
   if mask:
     values["Byte_2"] = int(stock_220["Byte_2"]) & ~0x04
+  elif spoof:
+    values["Byte_2"] = int(stock_220["Byte_2"]) | 0x04
   return packer.make_can_msg("wheelspeed1", CANBUS.cam, values)
 
 
-def create_cam_brake_request_ack(packer, stock_299, mask: bool):
-  # relay 0x299 to the camera; masked: Byte_5 bit3 (brake request acknowledge, active low: 0xFF -> 0xF7) set again
+def create_cam_brake_request_ack(packer, stock_299, mask: bool, spoof: bool = False):
+  # relay 0x299 to the camera; Byte_5 bit3 = brake request acknowledge, active low (0xFF -> 0xF7): masked sets it
+  # again, spoofed clears it
   values = {s: stock_299[s] for s in BYTES}
   if mask:
     values["Byte_5"] = int(stock_299["Byte_5"]) | 0x08
+  elif spoof:
+    values["Byte_5"] = int(stock_299["Byte_5"]) & ~0x08
   return packer.make_can_msg("NEW_MSG_299", CANBUS.cam, values)
 
 

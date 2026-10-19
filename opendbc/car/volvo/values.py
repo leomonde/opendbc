@@ -77,6 +77,13 @@ class CarControllerParams:
   # only) still aborted; 821-824 (all four) did not; 825 (0x299+0x220) did not either, so 0x133/0x323 are not needed;
   # 826 (0x299 alone) aborted 1.55 s after OP braked alone, so the camera checks 0x220 too. Minimal set: 0x299+0x220.
   CAM_BRAKE_MASK_MSGS = frozenset({0x220, 0x299})
+
+  # OP-only braking: when the camera asks for the hydraulic brake and OP does not, OP keeps its own plan and shows the
+  # camera the ack it expects (CAM_BRAKE_MASK_MSGS spoofed), so it does not abort. Case: a lead signalling and leaving
+  # the lane while braking, where the stock ACC keeps braking hard behind it. Once the camera asks below
+  # CAMERA_BRAKE_HONOR_BELOW during a brake request, OP honors it (min of both) until the camera releases the brake.
+  OP_IGNORES_MILD_CAMERA_BRAKE = True
+  CAMERA_BRAKE_HONOR_BELOW = -1.0  # m/s^2
   FSM4_NO_BRAKE_ACCEL_BP = [-0.45, -0.2, 0.0, 0.2, 0.45, 0.8, 1.5]
   FSM4_NO_BRAKE_VALUE_V = [13276, 13299, 13318, 13338, 13333, 13377, 13449]
 

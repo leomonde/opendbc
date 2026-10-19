@@ -287,3 +287,17 @@ def test_ecm_acc_state_decoding(b4, state):
 def test_cam_brake_mask_msgs_are_relayed_messages():
   # only messages carcontroller relays to the camera can be masked
   assert CarControllerParams.CAM_BRAKE_MASK_MSGS <= {0x133, 0x323, 0x220, 0x299}
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_220])
+def test_220_spoofs_brake_request(stock):
+  dat = volvocan.create_cam_wheel_status(CANPacker(DBC), parse("wheelspeed1", MSG_220, 50, stock), False, True)[1]
+  assert dat[2] == stock[2] | 0x04
+  assert dat[:2] == stock[:2] and dat[3:] == stock[3:]
+
+
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_299])
+def test_299_spoofs_ack(stock):
+  dat = volvocan.create_cam_brake_request_ack(CANPacker(DBC), parse("NEW_MSG_299", MSG_299, 50, stock), False, True)[1]
+  assert dat[5] == stock[5] & ~0x08  # 0xFF -> 0xF7
+  assert dat[:5] == stock[:5] and dat[6:] == stock[6:]
