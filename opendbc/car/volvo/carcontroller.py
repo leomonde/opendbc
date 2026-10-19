@@ -220,16 +220,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     elif self.cam_mask_frames > 0:
       self.cam_mask_frames -= 1
     mask = self.cam_mask_frames > 0
+    masked = CarControllerParams.CAM_BRAKE_MASK_MSGS
+    mask_133, mask_323, mask_220, mask_299 = (mask and addr in masked for addr in (0x133, 0x323, 0x220, 0x299))
     for stock_133 in CS.stock_133_frames:
-      if not mask:
+      if not mask_133:
         self.brake_level_133 = int(stock_133["Byte_1"]) & 0x7F
-      can_sends.append(volvocan.create_cam_brake_level(self.packer_pt, stock_133, self.brake_level_133 if mask else None))
+      can_sends.append(volvocan.create_cam_brake_level(self.packer_pt, stock_133, self.brake_level_133 if mask_133 else None))
     for stock_323 in CS.stock_323_frames:
-      can_sends.append(volvocan.create_cam_brake_status(self.packer_pt, stock_323, mask))
+      can_sends.append(volvocan.create_cam_brake_status(self.packer_pt, stock_323, mask_323))
     for stock_220 in CS.stock_220_frames:
-      can_sends.append(volvocan.create_cam_wheel_status(self.packer_pt, stock_220, mask))
+      can_sends.append(volvocan.create_cam_wheel_status(self.packer_pt, stock_220, mask_220))
     for stock_299 in CS.stock_299_frames:
-      can_sends.append(volvocan.create_cam_brake_request_ack(self.packer_pt, stock_299, mask))
+      can_sends.append(volvocan.create_cam_brake_request_ack(self.packer_pt, stock_299, mask_299))
 
     # Refresh custom ACC step every 100 frames and forward to carstate so that
     # _pending_delta emits exactly one synthetic event per physical ACC step.

@@ -282,3 +282,8 @@ ENGINE_DATA = 0x12A
 def test_ecm_acc_state_decoding(b4, state):
   dat = bytes([0xEA, 0x00, 0xC7, 0xF8, b4, 0xF8, 0xE5, 0x7A])
   assert int(parse("EngineData", ENGINE_DATA, 66, dat)["ACC_State_ECM"]) == state
+
+
+def test_cam_brake_mask_msgs_are_relayed_messages():
+  # only messages carcontroller relays to the camera can be masked
+  assert CarControllerParams.CAM_BRAKE_MASK_MSGS <= {0x133, 0x323, 0x220, 0x299}
