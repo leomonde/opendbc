@@ -37,6 +37,16 @@ class EcmAccState(IntEnum):
   ENGAGED = 3
 
 
+class NoTargetHold(IntEnum):
+  """OP stopping the car with no target (red light): the camera asks to cancel ACC (FSM3 Byte_2 bit5) and aborts 1.5 s
+  later if the ECM stays engaged (route 828). HOLD: the camera sees the ECM in standby (what it asked) while the ECM stays
+  engaged on OP's FSM0/FSM3/FSM4, built like a camera stopped behind a lead. RELEASE: OP wants to go, the camera sees
+  the ECM engaged again, as after a resume, until it re-engages (or a timeout gives the ECM the camera's state)."""
+  OFF = 0
+  HOLD = 1
+  RELEASE = 2
+
+
 class CarControllerParams:
   ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(90,
     ([0., 5., 15.], [5., .8, .15]),
@@ -90,6 +100,8 @@ class CarControllerParams:
   OP_STOPS_WITHOUT_TARGET = True
   NO_TARGET_STOP_SPEED = 10. * CV.KPH_TO_MS
   STOPPING_FLAG_SPEED = 3.5 * CV.KPH_TO_MS
+  NO_TARGET_STANDSTILL_DELAY = 2.5  # s stopped before FSM3 reports standstill, like the camera behind a lead (807, 827)
+  NO_TARGET_RELEASE_TIMEOUT = 3.0   # s for the camera to re-engage after the go
   CAMERA_BRAKE_HONOR_BELOW = -2.0  # m/s^2
   FSM4_NO_BRAKE_ACCEL_BP = [-0.45, -0.2, 0.0, 0.2, 0.45, 0.8, 1.5]
   FSM4_NO_BRAKE_VALUE_V = [13276, 13299, 13318, 13338, 13333, 13377, 13449]

@@ -5,7 +5,7 @@
 // Safety-relevant CAN messages for EUCD platform.
 #define VOLVO_EUCD_AccPedal      0x020  // RX, gas pedal
 #define VOLVO_EUCD_FSM0          0x051  // TX by OP (camera's relayed 1:1), ACC state; blocked both ways (main->cam in fwd hook)
-#define VOLVO_EUCD_EngineData    0x12A  // RX, ECM ACC state (the ECM is the ACC master, it leads FSM0)
+#define VOLVO_EUCD_EngineData    0x12A  // RX, ECM ACC state (the ECM is the ACC master, it leads FSM0); TX by OP to camera
 #define VOLVO_EUCD_VehicleSpeed1 0x148  // RX, vehicle speed
 #define VOLVO_EUCD_Brake_Info    0x20a  // RX, driver brake pressed
 #define VOLVO_EUCD_CCButtons     0x127  // TX by OP, CC buttons
@@ -175,6 +175,8 @@ static safety_config volvo_init(uint16_t param) {
     {VOLVO_EUCD_BRAKE_ACK,   VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_WHEELSPEED1, VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_BRAKE_REQ_ACK, VOLVO_CAM_BUS, 8, .check_relay = true},
+    // ECM ACC state to the camera: always blocked main->cam and relayed 1:1 by OP (standby shown at a no-target stop)
+    {VOLVO_EUCD_EngineData,  VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_FSM2,      VOLVO_MAIN_BUS, 8, .check_relay = true},   // OP replaces stock LKA command
     // FSM1/FSM3: check_relay=false — ECM validates a rolling counter; passthrough delay
     // causes ECM fault (~30s, drive 27). Stock flows untouched; OP's later TX wins via last-message-wins.

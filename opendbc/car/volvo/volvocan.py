@@ -86,7 +86,7 @@ def fsm3_traction(accel: float, mode: LongMode) -> int:
 
 
 def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | None = None, good_fsm3=None,
-                        hide_no_target_cancel: bool = False):
+                        hide_no_target_cancel: bool = False, standstill: bool = False):
   # pass stock FSM3 verbatim except ACC_AccelerationRequest and ACC_Check; bit flip faults ECU (drive 27).
   # With mode (OP long), also own Byte_2 bits[1:0] (LongMode) and Byte_3 (traction). Byte_2 upper bits
   # stay stock so the data (0xD4) / type (0x00) frame cadence of the camera is kept.
@@ -119,6 +119,8 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | N
     base = 0xD4 if int(stock_fsm3["Byte_4"]) == 0x81 else 0x00  # data / type frame
     values["Byte_2"] = base | (int(mode) if mode is not None else int(good_fsm3["Byte_2"]) & 0x03)
     values["Byte_6"] = 0
+  if standstill:  # OP holding a no-target stop: report standstill like the camera does behind a lead (0xEA -> 0xEB)
+    values["ACC_Standstill"] = 1
   return packer.make_can_msg("FSM3", 0, values)
 
 
@@ -204,6 +206,15 @@ def create_cam_brake_request_ack(packer, stock_299, mask: bool, spoof: bool = Fa
   elif spoof:
     values["Byte_5"] = int(stock_299["Byte_5"]) & ~0x08
   return packer.make_can_msg("NEW_MSG_299", CANBUS.cam, values)
+
+
+def create_cam_engine_data(packer, stock_12a, acc_state: int | None = None):
+  # relay 0x12A (EngineData) to the camera; with acc_state, Byte_4 bits 5:4 (ECM ACC state: 1 off, 2 standby,
+  # 3 engaged) show the camera that state instead of the ECM's (no counter/checksum, route 823)
+  values = {s: stock_12a[s] for s in BYTES}
+  if acc_state is not None:
+    values["Byte_4"] = (int(stock_12a["Byte_4"]) & ~0x30) | ((acc_state & 0x3) << 4)
+  return packer.make_can_msg("EngineData", CANBUS.cam, values)
 
 
 def create_radar(packer, stock_fsm1, mode: LongMode | None = None):

@@ -8,7 +8,7 @@ except ImportError:
 from opendbc.car.lateral import apply_std_steer_angle_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.volvo import volvocan
-from opendbc.car.volvo.values import CarControllerParams, LongMode, SteerDirection
+from opendbc.car.volvo.values import CarControllerParams, EcmAccState, LongMode, NoTargetHold, SteerDirection
 from opendbc.sunnypilot.car.volvo.icbm import IntelligentCruiseButtonManagementInterface
 
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -57,6 +57,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.cam_brake_honor = False
     self.spoof_cam_ack = False
     self.op_stopping_slow = False
+    self.nt_hold = NoTargetHold.OFF
+    self.nt_release_frames = 0
+    self.nt_departing = False
+    self.stopped_frames = 0
     self.op_stopping_flag = False
     self.cam_mask_frames = 0
     self.brake_level_133 = 0
@@ -65,7 +69,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.op_owns_acc = False
     self.cam_was_enabled = False
     self.fsm0_good = None
-    self.fsm3_good = None
+    self.fsm3_good = {}
     self.fsm4_good_byte2 = None
 
   def update(self, CC, CC_SP, CS, now_nanos):
@@ -150,8 +154,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # lead SNG above and openpilot's cruiseControl.resume never fire. When OP wants to go (left stopping, accel > 0)
     # while the car is stopped, send the same resume burst.
     go_request = (CarControllerParams.OP_STOPS_WITHOUT_TARGET and CC.longActive and CS.out.standstill and
-                  not CS.out.cruiseState.standstill and actuators.longControlState != LongCtrlState.stopping and
-                  actuators.accel > 0.)
+                  (self.nt_hold == NoTargetHold.HOLD or not CS.out.cruiseState.standstill) and
+                  actuators.longControlState != LongCtrlState.stopping and actuators.accel > 0.)
     if go_request and not self.waiting and (self.frame - self.last_resume_frame) * DT_CTRL > 1.00:
       can_sends.extend([volvocan.create_button_msg(self.packer_pt, resume=True)] * self.CCP.BUTTON_BURST)
       if self.go_count == 0:
@@ -169,20 +173,49 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     ecm_engaged = CS.ecm_acc_engaged
     if not ecm_engaged:
       self.cam_was_enabled = False
+
+    # No-target stop (red light), see NoTargetHold. Off right away on driver brake, cancel or ECM disengage.
+    self.stopped_frames = self.stopped_frames + 1 if CS.out.standstill else 0
+    if not (CarControllerParams.OP_STOPS_WITHOUT_TARGET and CC.enabled and ecm_engaged) or CS.out.brakePressed:
+      self.nt_hold = NoTargetHold.OFF
+    elif self.nt_hold == NoTargetHold.OFF:
+      wants_to_go = go_request or actuators.accel > 0. or actuators.longControlState == LongCtrlState.starting
+      if self.op_stopping_slow and not wants_to_go and bool(int(CS.stock_FSM3["Byte_2"]) & 0x20):
+        self.nt_hold = NoTargetHold.HOLD
+    elif self.nt_hold == NoTargetHold.HOLD:
+      if go_request or CS.out.gasPressed or self.long_mode != LongMode.BRAKE:
+        self.nt_hold = NoTargetHold.RELEASE
+        self.nt_release_frames = 0
+        self.nt_departing = True
+    else:
+      self.nt_release_frames += 1
+      if self.nt_release_frames * DT_CTRL > CarControllerParams.NO_TARGET_RELEASE_TIMEOUT:
+        self.nt_hold = NoTargetHold.OFF
+
+    # pulling away slowly after a no-target stop: the camera may ask to cancel again until the car is past that speed
+    if not CC.longActive or CS.out.vEgo > CarControllerParams.NO_TARGET_STOP_SPEED:
+      self.nt_departing = False
+
     for stock_fsm0 in CS.stock_FSM0_frames:
       cam_ok = bool(int(stock_fsm0["Byte_2"]) & 0x04) and int(stock_fsm0["Byte_3"]) == 0
       if cam_ok:
         self.fsm0_good = stock_fsm0
         self.cam_was_enabled = self.cam_was_enabled or ecm_engaged
-      self.op_owns_acc = (CarControllerParams.OP_OWNS_ACC_AFTER_CAMERA_ABORT and self.CP.openpilotLongitudinalControl and
-                          CC.enabled and ecm_engaged and self.cam_was_enabled and not cam_ok)
+        if self.nt_hold == NoTargetHold.RELEASE:
+          self.nt_hold = NoTargetHold.OFF  # the camera re-engaged after the go
+      takeover = (CarControllerParams.OP_OWNS_ACC_AFTER_CAMERA_ABORT and self.CP.openpilotLongitudinalControl and
+                  self.cam_was_enabled)
+      self.op_owns_acc = (CC.enabled and ecm_engaged and not cam_ok and self.fsm0_good is not None and
+                          (takeover or self.nt_hold != NoTargetHold.OFF))
       can_sends.append(volvocan.create_fsm0(self.packer_pt, stock_fsm0, ecm_engaged, self.fsm0_good if self.op_owns_acc else None))
     if not (ecm_engaged and CC.enabled):
       self.op_owns_acc = False
+    # last good camera FSM3 of each kind (data Byte_4 0x81 / type 0x00): their Byte_0 differ (0xEA vs 0x40)
+    fsm3_kind = int(CS.stock_FSM3["Byte_4"]) == 0x81
     if not self.op_owns_acc:
-      if int(CS.stock_FSM3["Byte_6"]) == 0 and (int(CS.stock_FSM3["Byte_2"]) & 0xFC) != 0xFC:
-        self.fsm3_good = CS.stock_FSM3
-    good_fsm3 = self.fsm3_good if self.op_owns_acc else None
+      if int(CS.stock_FSM3["Byte_6"]) == 0 and (int(CS.stock_FSM3["Byte_2"]) & 0xFC) not in (0xFC, 0xDC):
+        self.fsm3_good[fsm3_kind] = CS.stock_FSM3
+    good_fsm3 = self.fsm3_good.get(fsm3_kind) if self.op_owns_acc else None
 
     # FSM3/FSM1 at 50Hz wall-clock: relay stock values so ECU doesn't fault.
     # Override ACC_Check=1 during SNG resume so ECU acknowledges OP's CCButtons resume.
@@ -236,8 +269,12 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       # FSM1 Byte_2 bit2 stays the camera's for now: with it and FSM4 bit6 both from OP, the camera aborted ACC
       # ~1.5 s after OP braked (routes 812/814, FSM0 Byte_3 0x10). Test FSM4 bit6 alone to tell which one causes it.
       can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1))
+      nt_standstill = (self.nt_hold == NoTargetHold.HOLD and
+                       self.stopped_frames * DT_CTRL >= CarControllerParams.NO_TARGET_STANDSTILL_DELAY)
       can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check, long_mode, good_fsm3,
-                                                    hide_no_target_cancel=self.op_stopping_slow))
+                                                    hide_no_target_cancel=(self.op_stopping_slow or self.nt_departing or
+                                                                           self.nt_hold != NoTargetHold.OFF),
+                                                    standstill=nt_standstill))
 
     # FSM4: relay each camera frame 1:1 (panda always blocks the camera's); with OP long, OP owns the brake flag
     # (set whenever OP or the camera brakes, see FSM3 above)
@@ -272,6 +309,11 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       can_sends.append(volvocan.create_cam_wheel_status(self.packer_pt, stock_220, mask_220, spoof_220))
     for stock_299 in CS.stock_299_frames:
       can_sends.append(volvocan.create_cam_brake_request_ack(self.packer_pt, stock_299, mask_299, spoof_299))
+
+    # ECM ACC state -> camera: relayed 1:1, standby shown while OP holds a no-target stop (NoTargetHold.HOLD)
+    cam_ecm_state = EcmAccState.STANDBY if (self.nt_hold == NoTargetHold.HOLD and ecm_engaged) else None
+    for stock_12a in CS.stock_12A_frames:
+      can_sends.append(volvocan.create_cam_engine_data(self.packer_pt, stock_12a, cam_ecm_state))
 
     # Refresh custom ACC step every 100 frames and forward to carstate so that
     # _pending_delta emits exactly one synthetic event per physical ACC step.

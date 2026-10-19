@@ -321,3 +321,18 @@ def test_fsm4_stopping_flag():
   fsm4 = parse("FSM4", FSM4, 33, stock)
   assert volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE, stopping=True)[1][1] == stock[1] | 0x08
   assert volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE)[1][1] == stock[1]
+
+
+@pytest.mark.parametrize("state", [None, EcmAccState.STANDBY, EcmAccState.ENGAGED])
+def test_engine_data_relay_to_camera(state):
+  stock = bytes([0xEA, 0x00, 0xC7, 0xF8, 0xB7, 0xF8, 0xE5, 0x7A])  # ECM engaged (bits 5:4 = 3)
+  addr, dat, bus = volvocan.create_cam_engine_data(CANPacker(DBC), parse("EngineData", ENGINE_DATA, 66, stock), state)
+  assert (addr, bus) == (ENGINE_DATA, 2)
+  want = stock[4] if state is None else (stock[4] & ~0x30) | (state << 4)
+  assert dat[4] == want and dat[:4] == stock[:4] and dat[5:] == stock[5:]
+
+
+def test_fsm3_standstill_when_holding():
+  stock = bytes.fromhex("ea7ed4f481000000")
+  out = volvocan.create_longitudinal(CANPacker(DBC), parse_fsm3(stock), -2.0, 0, LongMode.BRAKE, standstill=True)[1]
+  assert out[0] == 0xEB
