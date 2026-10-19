@@ -19,7 +19,7 @@ def create_button_msg(packer, resume=False, cancel=False, set_plus=False, minus=
 
 
 def create_lkas_state_msg(packer, steering_angle: float, stock_values: dict):
-  # zero LKATorque/LKAActive to prevent stock LKA interference
+  # servo state to the camera, LKA torque/active cleared
   msg = {
     "LKATorque": 0,
     "SteeringAngleServo": steering_angle,
@@ -76,8 +76,7 @@ def next_long_mode(mode: LongMode, accel: float) -> LongMode:
 
 
 def fsm3_traction(accel: float, mode: LongMode) -> int:
-  # FSM3 Byte_3: traction request fit from stock camera (808): 0 in BRAKE,
-  # 89*a-4 in DRIVE (R2 0.88, stock range 0..165), signed 57*a-15 in COAST
+  # FSM3 Byte_3 traction request (fit to the stock camera)
   if mode == LongMode.BRAKE:
     return 0
   if mode == LongMode.DRIVE:
@@ -87,11 +86,8 @@ def fsm3_traction(accel: float, mode: LongMode) -> int:
 
 def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | None = None, good_fsm3=None,
                         hide_no_target_cancel: bool = False, standstill: bool = False):
-  # pass stock FSM3 verbatim except ACC_AccelerationRequest and ACC_Check; bit flip faults ECU (drive 27).
-  # With mode (OP long), also own Byte_2 bits[1:0] (LongMode) and Byte_3 (traction). Byte_2 upper bits
-  # stay stock so the data (0xD4) / type (0x00) frame cadence of the camera is kept.
-  # With good_fsm3 (OP owns ACC after the camera's abort), the camera's abort marks (Byte_0 0xAB, Byte_2 0xFC,
-  # Byte_6 0x01) are replaced by the last frame before the abort.
+  # Camera FSM3 with OP's accel and ACC_Check; with mode, also OP's mode (Byte_2 bits 1:0) and traction.
+  # good_fsm3: the camera's last good frame, held toward the ECM.
   values = {s: stock_fsm3[s] for s in (
     "ACC_Standstill",
     "Byte_01",
@@ -111,21 +107,20 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | N
     values["Byte_2"] = (int(stock_fsm3["Byte_2"]) & 0xFC) | int(mode)
     values["Byte_3"] = fsm3_traction(accel, mode)
   if hide_no_target_cancel:
-    # Byte_2 bit5: the camera's cancel when the car gets slow with no target (route 827: 0xD5 -> 0xF5 data,
-    # 0x01 -> 0x21 type at 2.5 km/h, ECM disengaged 70 ms later); never seen in stock with ACC engaged
+    # Byte_2 bit5: the camera's cancel when slow with no target
     values["Byte_2"] = int(values["Byte_2"]) & ~0x20
   if good_fsm3 is not None:
     values |= {s: good_fsm3[s] for s in ("ACC_Standstill", "Byte_01", "Byte_02")}
     base = 0xD4 if int(stock_fsm3["Byte_4"]) == 0x81 else 0x00  # data / type frame
     values["Byte_2"] = base | (int(mode) if mode is not None else int(good_fsm3["Byte_2"]) & 0x03)
     values["Byte_6"] = 0
-  if standstill:  # OP holding a no-target stop: report standstill like the camera does behind a lead (0xEA -> 0xEB)
+  if standstill:
     values["ACC_Standstill"] = 1
   return packer.make_can_msg("FSM3", 0, values)
 
 
 def fsm4_brake_value(accel: float, brake: bool) -> int:
-  # FSM4 Byte_5/Byte_6 16-bit value for OP's accel: 0x8000 | (0x4000 if brake) | 14-bit decel target
+  # FSM4 Byte_5/Byte_6: 0x8000 | brake flag 0x4000 | 14-bit target
   CCP = CarControllerParams
   bp, v = (CCP.FSM4_BRAKE_ACCEL_BP, CCP.FSM4_BRAKE_VALUE_V) if brake else (CCP.FSM4_NO_BRAKE_ACCEL_BP, CCP.FSM4_NO_BRAKE_VALUE_V)
   return 0x8000 | (0x4000 if brake else 0) | int(round(float(np.interp(accel, bp, v))))
@@ -133,38 +128,33 @@ def fsm4_brake_value(accel: float, brake: bool) -> int:
 
 def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None, good_byte2: int | None = None,
                 stopping: bool = False, cam_weight: float = 0.):
-  # relay one stock FSM4 per camera frame (Byte_0 alternates 0x55/0xAA in runs of 3-4, so no duplicates).
-  # With mode (OP long), the ECM's hydraulic brake follows OP: Byte_5/Byte_6 come from OP's accel when OP brakes,
-  # or when the camera brakes and OP does not; otherwise they stay the camera's.
+  # Camera FSM4 relayed per frame; with mode, the brake flag and target follow OP's accel when either side brakes.
   values = {s: stock_fsm4[s] for s in ("Byte_0", "Byte_1", "Byte_2", "ACC_LeadSpeed", "Byte_4", "Byte_5", "Byte_6", "Byte_7")}
   op_brake = mode == LongMode.BRAKE
   cam_brake = bool(int(stock_fsm4["Byte_5"]) & 0x40)
   if mode is not None and (op_brake or cam_brake):
     value = fsm4_brake_value(accel, op_brake)
     if cam_weight > 0. and op_brake and cam_brake:
-      # handing the stop to the camera: blend OP's 14-bit brake target into the camera's, no step in brake pressure
+      # blend into the camera's target while handing it the stop
       cam_value = ((int(stock_fsm4["Byte_5"]) << 8) | int(stock_fsm4["Byte_6"])) & 0x3FFF
       blended = int(round((value & 0x3FFF) + cam_weight * (cam_value - (value & 0x3FFF))))
       value = (value & 0xC000) | blended
     values["Byte_5"] = value >> 8
     values["Byte_6"] = value & 0xFF
-  if good_byte2 is not None:  # OP owns ACC after the camera's abort: its Byte_2 goes to 0xFC
+  if good_byte2 is not None:
     values["Byte_2"] = good_byte2
   if stopping:
-    # Byte_1 bit3: the camera's "stopping" flag (0xF1 -> 0xF9 below ~3.5 km/h when it stops behind a lead, kept while
-    # stopped, routes 807/827); OP sets it when it stops the car by itself (red light, no lead)
+    # Byte_1 bit3: "stopping" flag
     values["Byte_1"] = int(stock_fsm4["Byte_1"]) | 0x08
   return packer.make_can_msg("FSM4", 0, values)
 
 
 def create_fsm0(packer, stock_fsm0, ecm_engaged: bool, good_fsm0=None):
-  # relay one camera FSM0 per frame (panda always blocks the camera's). The ECM is the ACC master (it leads FSM0 by
-  # 35-60 ms in stock routes); FSM0 never reports ACC enabled when the ECM is not engaged (enforced by the safety too).
-  # With good_fsm0, OP owns ACC (OP long engaged, camera's ACC function aborted): keep the state before the abort
-  # instead of the camera's (Byte_2 0x86/0x87 -> 0x82, Byte_3 0x10, Byte_7 bit2).
+  # Camera FSM0 relayed per frame, never ACC enabled without the ECM engaged.
+  # good_fsm0: the camera's last good state, held toward the ECM (lead bit stays live).
   values = {s: stock_fsm0[s] for s in BYTES}
   if good_fsm0 is not None:
-    values["Byte_2"] = (int(good_fsm0["Byte_2"]) & ~0x01) | (int(stock_fsm0["Byte_2"]) & 0x01)  # FrontCar stays live
+    values["Byte_2"] = (int(good_fsm0["Byte_2"]) & ~0x01) | (int(stock_fsm0["Byte_2"]) & 0x01)
     values["Byte_3"] = good_fsm0["Byte_3"]
     values["Byte_7"] = int(stock_fsm0["Byte_7"]) & ~0x04
   if not ecm_engaged:
@@ -176,7 +166,7 @@ BYTES = tuple(f"Byte_{i}" for i in range(8))
 
 
 def create_cam_brake_status(packer, stock_323, mask: bool):
-  # relay 0x323 to the camera; masked: Byte_4 bit4 (ECM brake request acknowledge, 0xC5 -> 0xD5) cleared
+  # 0x323 to the camera; masked: Byte_4 bit4 (brake applied) cleared
   values = {s: stock_323[s] for s in BYTES}
   if mask:
     values["Byte_4"] = int(stock_323["Byte_4"]) & ~0x10
@@ -184,7 +174,7 @@ def create_cam_brake_status(packer, stock_323, mask: bool):
 
 
 def create_cam_brake_level(packer, stock_133, frozen_level: int | None):
-  # relay 0x133 to the camera; masked: Byte_1 bits 6..0 (ABS brake level) held at the value before OP braked
+  # 0x133 to the camera; masked: Byte_1 bits 6:0 (brake level) held
   values = {s: stock_133[s] for s in BYTES}
   if frozen_level is not None:
     values["Byte_1"] = (int(stock_133["Byte_1"]) & 0x80) | (frozen_level & 0x7F)
@@ -192,8 +182,7 @@ def create_cam_brake_level(packer, stock_133, frozen_level: int | None):
 
 
 def create_cam_wheel_status(packer, stock_220, mask: bool, spoof: bool = False):
-  # relay 0x220 (wheelspeed1) to the camera; Byte_2 bit2 = brake request active (0xE0 -> 0xE4): masked clears it,
-  # spoofed sets it (the camera's own request, which OP does not pass to the car)
+  # 0x220 to the camera; Byte_2 bit2 (brake request active): masked clears it, spoofed sets it
   values = {s: stock_220[s] for s in BYTES}
   if mask:
     values["Byte_2"] = int(stock_220["Byte_2"]) & ~0x04
@@ -203,8 +192,7 @@ def create_cam_wheel_status(packer, stock_220, mask: bool, spoof: bool = False):
 
 
 def create_cam_brake_request_ack(packer, stock_299, mask: bool, spoof: bool = False):
-  # relay 0x299 to the camera; Byte_5 bit3 = brake request acknowledge, active low (0xFF -> 0xF7): masked sets it
-  # again, spoofed clears it
+  # 0x299 to the camera; Byte_5 bit3 (brake ack, active low): masked sets it, spoofed clears it
   values = {s: stock_299[s] for s in BYTES}
   if mask:
     values["Byte_5"] = int(stock_299["Byte_5"]) | 0x08
@@ -214,8 +202,7 @@ def create_cam_brake_request_ack(packer, stock_299, mask: bool, spoof: bool = Fa
 
 
 def create_cam_engine_data(packer, stock_12a, acc_state: int | None = None):
-  # relay 0x12A (EngineData) to the camera; with acc_state, Byte_4 bits 5:4 (ECM ACC state: 1 off, 2 standby,
-  # 3 engaged) show the camera that state instead of the ECM's (no counter/checksum, route 823)
+  # 0x12A to the camera; acc_state replaces the ECM's ACC state (Byte_4 bits 5:4)
   values = {s: stock_12a[s] for s in BYTES}
   if acc_state is not None:
     values["Byte_4"] = (int(stock_12a["Byte_4"]) & ~0x30) | ((acc_state & 0x3) << 4)
@@ -223,8 +210,7 @@ def create_cam_engine_data(packer, stock_12a, acc_state: int | None = None):
 
 
 def create_radar(packer, stock_fsm1, mode: LongMode | None = None):
-  # pass stock FSM1 verbatim; spoofing ACC_Distance=255 caused stock ACC to disengage below 30 km/h.
-  # With mode (OP long), Byte_2 bit2 follows OP braking (camera sets it in BRAKE: 0xB8->0xBC data, 0x00->0x04 type).
+  # Camera FSM1 relayed; with mode, Byte_2 bit2 follows OP braking
   values = {s: stock_fsm1[s] for s in (
     "ACC_Distance",
     "Byte_1",

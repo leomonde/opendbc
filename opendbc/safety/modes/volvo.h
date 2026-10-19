@@ -4,20 +4,20 @@
 
 // Safety-relevant CAN messages for EUCD platform.
 #define VOLVO_EUCD_AccPedal      0x020  // RX, gas pedal
-#define VOLVO_EUCD_FSM0          0x051  // TX by OP (camera's relayed 1:1), ACC state; blocked both ways (main->cam in fwd hook)
-#define VOLVO_EUCD_EngineData    0x12A  // RX, ECM ACC state (the ECM is the ACC master, it leads FSM0); TX by OP to camera
+#define VOLVO_EUCD_FSM0          0x051  // TX by OP, camera's relayed; ACC state
+#define VOLVO_EUCD_EngineData    0x12A  // RX, ECM ACC state; TX by OP to camera
 #define VOLVO_EUCD_VehicleSpeed1 0x148  // RX, vehicle speed
 #define VOLVO_EUCD_Brake_Info    0x20a  // RX, driver brake pressed
 #define VOLVO_EUCD_CCButtons     0x127  // TX by OP, CC buttons
 #define VOLVO_EUCD_PSCM1         0x246  // TX by OP to camera, PSCM state
-#define VOLVO_EUCD_BRAKE_LEVEL   0x133  // TX by OP to camera, ABS brake level (masked while OP brakes)
-#define VOLVO_EUCD_BRAKE_ACK     0x323  // TX by OP to camera, ECM brake request acknowledge (masked while OP brakes)
-#define VOLVO_EUCD_WHEELSPEED1   0x220  // TX by OP to camera, rear wheel speeds + brake request active (masked while OP brakes)
-#define VOLVO_EUCD_BRAKE_REQ_ACK 0x299  // TX by OP to camera, brake request acknowledge (masked while OP brakes)
+#define VOLVO_EUCD_BRAKE_LEVEL   0x133  // TX by OP to camera, brake level
+#define VOLVO_EUCD_BRAKE_ACK     0x323  // TX by OP to camera, brake applied
+#define VOLVO_EUCD_WHEELSPEED1   0x220  // TX by OP to camera, rear wheel speeds + brake request active
+#define VOLVO_EUCD_BRAKE_REQ_ACK 0x299  // TX by OP to camera, brake request ack
 #define VOLVO_EUCD_FSM1          0x260  // TX by OP, ACC radar/distance message (oplong)
 #define VOLVO_EUCD_FSM2          0x262  // TX by OP, LKA command
 #define VOLVO_EUCD_FSM3          0x270  // TX by OP, ACC accel request + status
-#define VOLVO_EUCD_FSM4          0x31A  // TX by OP, ACC lead/brake status (Byte_5 bit6 = hydraulic brake request)
+#define VOLVO_EUCD_FSM4          0x31A  // TX by OP, camera's relayed; brake request
 
 // CAN bus numbers.
 #define VOLVO_MAIN_BUS 0U
@@ -54,8 +54,7 @@ static void volvo_rx_hook(const CANPacket_t *msg) {
     }
 
     if (addr == VOLVO_EUCD_EngineData) {
-      // Signal: ACC_State_ECM (bits 5:4 of byte 4: 1 off, 2 standby, 3 engaged). Engagement comes from the ECM, which
-      // the driver engages with the CC buttons; the camera's FSM0 only follows it (and OP replaces FSM0).
+      // Signal: ACC_State_ECM (byte 4 bits 5:4: 1 off, 2 standby, 3 engaged)
       bool cruise_engaged = ((GET_BYTES(msg, 4, 1) >> 4) & 0x3U) == 0x3U;
       pcm_cruise_check(cruise_engaged);
     }
@@ -148,16 +147,13 @@ static bool volvo_tx_hook(const CANPacket_t *msg) {
 
 static bool volvo_fwd_hook(int bus_num, int addr) {
   bool block_msg = false;
-  // Block stock FSM1/FSM3 cam->main when controls_allowed so OP relays at 50Hz
-  // and ACC_Check=1 isn't overwritten by stock's ACC_Check=0 during SNG.
+  // camera FSM1/FSM3 blocked while OP controls (OP sends them)
   if (((unsigned int)bus_num == VOLVO_CAM_BUS) && controls_allowed && !gas_pressed) {
     if ((addr == VOLVO_EUCD_FSM1) || (addr == VOLVO_EUCD_FSM3)) {
-      block_msg = true;  // OP relays via create_radar/create_longitudinal
+      block_msg = true;
     }
   }
-  // FSM0: never forwarded main->cam, so the camera only sees its own FSM0 (cam->main is already blocked by
-  // check_relay on MAIN_BUS). Done here and not with check_relay on CAM_BUS: the camera transmits FSM0 on bus 2,
-  // which would trip the relay malfunction check.
+  // FSM0 never forwarded main->cam (check_relay on CAM_BUS would trip on the camera's own FSM0)
   if (((unsigned int)bus_num == VOLVO_MAIN_BUS) && (addr == VOLVO_EUCD_FSM0)) {
     block_msg = true;
   }
@@ -170,22 +166,18 @@ static safety_config volvo_init(uint16_t param) {
   static const CanMsg VOLVO_EUCD_TX_MSGS[] = {
     {VOLVO_EUCD_CCButtons, VOLVO_MAIN_BUS, 8, .check_relay = false},
     {VOLVO_EUCD_PSCM1,     VOLVO_CAM_BUS,  8, .check_relay = true},   // OP replaces stock steering servo state
-    // car brake response to the camera: always blocked main->cam and relayed 1:1 by OP, masked while OP brakes
+    // car -> camera, relayed by OP
     {VOLVO_EUCD_BRAKE_LEVEL, VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_BRAKE_ACK,   VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_WHEELSPEED1, VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_BRAKE_REQ_ACK, VOLVO_CAM_BUS, 8, .check_relay = true},
-    // ECM ACC state to the camera: always blocked main->cam and relayed 1:1 by OP (standby shown at a no-target stop)
     {VOLVO_EUCD_EngineData,  VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_FSM2,      VOLVO_MAIN_BUS, 8, .check_relay = true},   // OP replaces stock LKA command
-    // FSM1/FSM3: check_relay=false — ECM validates a rolling counter; passthrough delay
-    // causes ECM fault (~30s, drive 27). Stock flows untouched; OP's later TX wins via last-message-wins.
+    // FSM1/FSM3: camera's pass through while OP does not control (relay delay faults the ECM)
     {VOLVO_EUCD_FSM1,      VOLVO_MAIN_BUS, 8, .check_relay = false},
     {VOLVO_EUCD_FSM3,      VOLVO_MAIN_BUS, 8, .check_relay = false},
-    // FSM4: always blocked cam->main and relayed 1:1 by OP (Byte_0 alternates in runs, duplicates must be avoided)
+    // camera -> car, relayed by OP
     {VOLVO_EUCD_FSM4,      VOLVO_MAIN_BUS, 8, .check_relay = true},
-    // FSM0: always blocked cam->main and relayed 1:1 by OP; ACC enabled only with the ECM engaged (tx hook).
-    // Also blocked main->cam in the fwd hook (not via check_relay on CAM_BUS, the camera sends FSM0 there).
     {VOLVO_EUCD_FSM0,      VOLVO_MAIN_BUS, 8, .check_relay = true},
   };
 

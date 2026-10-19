@@ -56,11 +56,10 @@ class CarState(CarStateBase):
     ret.cruiseState.speed = pt_cp.vl["ACC_Speed"]["ACC_Speed"] * CV.KPH_TO_MS
     ret.cruiseState.speedCluster = ret.cruiseState.speed
     ret.cruiseState.available = bool(cam_cp.vl["FSM0"]["ACC_Available"])
-    # the ECM owns the ACC state (EngineData leads the camera's FSM0 by 35-60 ms in stock routes), so OP follows the ECM
+    # the ECM is the ACC master
     self.ecm_acc_engaged = int(pt_cp.vl["EngineData"]["ACC_State_ECM"]) == EcmAccState.ENGAGED
     ret.cruiseState.enabled = self.ecm_acc_engaged
-    # standstill hold; SNG uses this to time the resume blast (hard-cancel without it, drive 38).
-    # Gated by the car's standstill: the camera also sets this bit in its fault state (FSM3 Byte_0 0xAB)
+    # camera standstill hold (also set in its fault state, so gated by the car's standstill)
     ret.cruiseState.standstill = bool(cam_cp.vl["FSM3"]["ACC_Standstill"]) and ret.standstill
     ret.cruiseState.nonAdaptive = False
     ret.accFaulted = False
@@ -121,8 +120,7 @@ class CarState(CarStateBase):
     self.stock_FSM1 = copy.copy(cam_cp.vl["FSM1"])
     self.stock_FSM3 = copy.copy(cam_cp.vl["FSM3"])
     self.ACC_Check = cam_cp.vl["FSM3"]["ACC_Check"]
-    # every frame received this cycle of the messages the panda always blocks and carcontroller relays 1:1:
-    # camera FSM4 to the car, and the car's brake response (0x133, 0x323, 0x220, 0x299) and ECM state (0x12A) to the camera
+    # all frames this cycle of the messages carcontroller relays 1:1
     self.stock_FSM0_frames = all_frames(cam_cp, "FSM0")
     self.stock_FSM4_frames = all_frames(cam_cp, "FSM4")
     self.stock_133_frames = all_frames(pt_cp, "NEW_MSG_133")
