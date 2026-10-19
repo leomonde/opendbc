@@ -1,5 +1,5 @@
 from opendbc.can import CANPacker
-from opendbc.car import Bus, DT_CTRL
+from opendbc.car import Bus, DT_CTRL, structs
 
 try:
   from openpilot.common.params import Params
@@ -10,6 +10,8 @@ from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.volvo import volvocan
 from opendbc.car.volvo.values import CarControllerParams, LongMode, SteerDirection
 from opendbc.sunnypilot.car.volvo.icbm import IntelligentCruiseButtonManagementInterface
+
+LongCtrlState = structs.CarControl.Actuators.LongControlState
 
 
 class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterface):
@@ -39,6 +41,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.distance = 0
     self.waiting = False
     self.sng_count = 0
+    self.go_count = 0
     # FSM3 ACC_Check=1 ack window: stock FSM3 has ACC_Check=0; ECU ignores
     # OP's CCButtons resume unless FSM3 confirms it. Force 25 frames (~0.5s).
     self.sng_ack_frames = 0
@@ -142,6 +145,21 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       if self.waiting and (self.sng_count >= 5 or not CS.out.cruiseState.standstill):
         self.waiting = False
         self.last_resume_frame = self.frame
+
+    # Pull away from a stop OP made with no target (green light): the camera never reports standstill there, so the
+    # lead SNG above and openpilot's cruiseControl.resume never fire. When OP wants to go (left stopping, accel > 0)
+    # while the car is stopped, send the same resume burst.
+    go_request = (CarControllerParams.OP_STOPS_WITHOUT_TARGET and CC.longActive and CS.out.standstill and
+                  not CS.out.cruiseState.standstill and actuators.longControlState != LongCtrlState.stopping and
+                  actuators.accel > 0.)
+    if go_request and not self.waiting and (self.frame - self.last_resume_frame) * DT_CTRL > 1.00:
+      can_sends.extend([volvocan.create_button_msg(self.packer_pt, resume=True)] * self.CCP.BUTTON_BURST)
+      if self.go_count == 0:
+        self.sng_ack_frames = 25
+      self.go_count += 1
+    if self.go_count > 0 and (self.go_count >= 5 or not go_request):
+      self.go_count = 0
+      self.last_resume_frame = self.frame
 
     # FSM0: relay each camera frame 1:1 (panda always blocks the camera's). With OP long the camera aborts its ACC
     # function ~1.5 s after OP brakes for something it did not see (routes 812-816). The ECM is the ACC master
