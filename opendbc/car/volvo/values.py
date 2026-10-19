@@ -83,7 +83,7 @@ class CarControllerParams:
   # the lane while braking, where the stock ACC keeps braking hard behind it. Once the camera asks below
   # CAMERA_BRAKE_HONOR_BELOW during a brake request, OP honors it (min of both) until the camera releases the brake.
   OP_IGNORES_MILD_CAMERA_BRAKE = True
-  CAMERA_BRAKE_HONOR_BELOW = -1.0  # m/s^2
+  CAMERA_BRAKE_HONOR_BELOW = -2.0  # m/s^2
   FSM4_NO_BRAKE_ACCEL_BP = [-0.45, -0.2, 0.0, 0.2, 0.45, 0.8, 1.5]
   FSM4_NO_BRAKE_VALUE_V = [13276, 13299, 13318, 13338, 13333, 13377, 13449]
 
