@@ -5,7 +5,7 @@
 // Safety-relevant CAN messages for EUCD platform.
 #define VOLVO_EUCD_AccPedal      0x020  // RX, gas pedal
 #define VOLVO_EUCD_FSM0          0x051  // TX by OP (camera's relayed 1:1), ACC state; blocked both ways (main->cam in fwd hook)
-#define VOLVO_EUCD_EngineData    0x12A  // RX, ECM ACC engaged (the ECM is the ACC master, it leads FSM0)
+#define VOLVO_EUCD_EngineData    0x12A  // RX, ECM ACC state (the ECM is the ACC master, it leads FSM0)
 #define VOLVO_EUCD_VehicleSpeed1 0x148  // RX, vehicle speed
 #define VOLVO_EUCD_Brake_Info    0x20a  // RX, driver brake pressed
 #define VOLVO_EUCD_CCButtons     0x127  // TX by OP, CC buttons
@@ -54,9 +54,9 @@ static void volvo_rx_hook(const CANPacket_t *msg) {
     }
 
     if (addr == VOLVO_EUCD_EngineData) {
-      // Signal: ACC_Engaged_ECM (bit 4 of byte 4). Engagement comes from the ECM, which the driver engages with the
-      // CC buttons; the camera's FSM0 only follows it (and OP replaces FSM0).
-      bool cruise_engaged = (GET_BYTES(msg, 4, 1) & 0x10U) != 0U;
+      // Signal: ACC_State_ECM (bits 5:4 of byte 4: 1 off, 2 standby, 3 engaged). Engagement comes from the ECM, which
+      // the driver engages with the CC buttons; the camera's FSM0 only follows it (and OP replaces FSM0).
+      bool cruise_engaged = ((GET_BYTES(msg, 4, 1) >> 4) & 0x3U) == 0x3U;
       pcm_cruise_check(cruise_engaged);
     }
   } else {

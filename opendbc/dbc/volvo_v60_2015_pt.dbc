@@ -84,8 +84,7 @@ BO_ 298 EngineData: 8 XXX
  SG_ NEW_SIGNAL_2 : 33|10@0- (1,0) [0|7] "" XXX
  SG_ NEW_SIGNAL_3 : 34|1@0+ (1,0) [0|1] "" XXX
  SG_ NEW_SIGNAL_4 : 35|1@0+ (1,0) [0|1] "" XXX
- SG_ ACC_Engaged_ECM : 36|1@0+ (1,0) [0|1] "" XXX
- SG_ NEW_SIGNAL_6 : 37|1@0+ (1,0) [0|1] "" XXX
+ SG_ ACC_State_ECM : 37|2@0+ (1,0) [0|3] "" XXX
  SG_ BrakePressed : 38|1@0+ (1,0) [0|1] "" XXX
  SG_ EngineRpm : 52|13@0+ (1,0) [0|8000] "" XXX
 

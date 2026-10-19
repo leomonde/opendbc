@@ -49,7 +49,7 @@ class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
 
   def _pcm_status_msg(self, enable):
     # engagement comes from the ECM (EngineData), not from the camera's FSM0
-    values = {"ACC_Engaged_ECM": 1 if enable else 0}
+    values = {"ACC_State_ECM": 3 if enable else 2}  # engaged / standby
     return self.packer.make_can_msg_safety("EngineData", self.VOLVO_MAIN_BUS, values)
 
   def _fsm0_msg(self, acc_enabled: bool):
@@ -62,6 +62,15 @@ class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
       self._rx(self._pcm_status_msg(ecm_engaged))
       self.assertTrue(self._tx(self._fsm0_msg(False)))
       self.assertEqual(ecm_engaged, self._tx(self._fsm0_msg(True)), f"{ecm_engaged=}")
+
+  def test_ecm_acc_off_is_not_engaged(self):
+    # EngineData ACC_State_ECM: 1 off, 2 standby, 3 engaged. Turning ACC off (On/Off in standby) gives 1, which has
+    # bit 4 set like engaged (route 823); only 3 allows controls
+    for state, engaged in ((1, False), (2, False), (3, True)):
+      self.safety.set_controls_allowed(False)
+      self._rx(self._pcm_status_msg(False))
+      self._rx(self.packer.make_can_msg_safety("EngineData", self.VOLVO_MAIN_BUS, {"ACC_State_ECM": state}))
+      self.assertEqual(engaged, self.safety.get_controls_allowed(), f"{state=}")
 
   def test_camera_fsm0_does_not_engage(self):
     # the camera's FSM0 is not an engagement source anymore

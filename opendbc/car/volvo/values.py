@@ -28,6 +28,14 @@ class LongMode(IntEnum):
   DRIVE = 2
 
 
+class EcmAccState(IntEnum):
+  """EngineData Byte_4 bits 5:4, ACC state in the ECM (stock route 808: 1 with the camera's ACC off, 2 standby, 3 engaged).
+  Pressing On/Off in standby goes to OFF, so bit 4 alone (OFF and ENGAGED) is not "engaged" (route 823)."""
+  OFF = 1
+  STANDBY = 2
+  ENGAGED = 3
+
+
 class CarControllerParams:
   ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(90,
     ([0., 5., 15.], [5., .8, .15]),

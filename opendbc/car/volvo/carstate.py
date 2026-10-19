@@ -2,7 +2,7 @@ import copy
 from opendbc.can import CANParser
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.volvo.values import CarControllerParams, DBC, CANBUS
+from opendbc.car.volvo.values import CarControllerParams, DBC, CANBUS, EcmAccState
 from opendbc.car import Bus, structs
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -56,9 +56,8 @@ class CarState(CarStateBase):
     ret.cruiseState.speed = pt_cp.vl["ACC_Speed"]["ACC_Speed"] * CV.KPH_TO_MS
     ret.cruiseState.speedCluster = ret.cruiseState.speed
     ret.cruiseState.available = bool(cam_cp.vl["FSM0"]["ACC_Available"])
-    # the ECM owns the ACC state (EngineData bit leads the camera's FSM0 by 35-60 ms in stock routes); with OP long the
-    # camera's own abort (FSM0) is held back by carcontroller, so OP must follow the ECM, not the camera
-    self.ecm_acc_engaged = bool(pt_cp.vl["EngineData"]["ACC_Engaged_ECM"])
+    # the ECM owns the ACC state (EngineData leads the camera's FSM0 by 35-60 ms in stock routes), so OP follows the ECM
+    self.ecm_acc_engaged = int(pt_cp.vl["EngineData"]["ACC_State_ECM"]) == EcmAccState.ENGAGED
     ret.cruiseState.enabled = self.ecm_acc_engaged
     # standstill hold; SNG uses this to time the resume blast (hard-cancel without it, drive 38).
     # Gated by the car's standstill: the camera also sets this bit in its fault state (FSM3 Byte_0 0xAB)

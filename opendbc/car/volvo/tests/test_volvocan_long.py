@@ -5,7 +5,7 @@ import pytest
 
 from opendbc.can import CANPacker, CANParser
 from opendbc.car.volvo import volvocan
-from opendbc.car.volvo.values import CarControllerParams, LongMode
+from opendbc.car.volvo.values import CarControllerParams, EcmAccState, LongMode
 
 DBC = "volvo_v60_2015_pt"
 FSM3 = 0x270
@@ -272,3 +272,13 @@ def test_fsm4_op_owns_acc_after_camera_abort():
   out = volvocan.create_fsm4(CANPacker(DBC), parse("FSM4", FSM4, 33, FSM4_ABORT), -1.0, LongMode.BRAKE, 0x5A)[1]
   assert out[2] == 0x5A
   assert out[0] == FSM4_ABORT[0] and out[3:5] == FSM4_ABORT[3:5]
+
+
+ENGINE_DATA = 0x12A
+
+
+# stock car frames (route 823 / 821): Byte_4 0xA8 standby, 0x98 just turned off, 0xB8 engaged
+@pytest.mark.parametrize("b4,state", [(0xA8, EcmAccState.STANDBY), (0x98, EcmAccState.OFF), (0xB8, EcmAccState.ENGAGED)])
+def test_ecm_acc_state_decoding(b4, state):
+  dat = bytes([0xEA, 0x00, 0xC7, 0xF8, b4, 0xF8, 0xE5, 0x7A])
+  assert int(parse("EngineData", ENGINE_DATA, 66, dat)["ACC_State_ECM"]) == state
