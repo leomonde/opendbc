@@ -57,6 +57,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.cam_brake_honor = False
     self.spoof_cam_ack = False
     self.cam_brake_target = 0
+    self.cam_stop = False
+    self.cam_stop_w = 0.
+    self.cam_relay = False
+    self.cam_weight = 0.
     self.op_stopping_slow = False
     self.nt_hold = NoTargetHold.OFF
     self.nt_release_frames = 0
@@ -72,6 +76,22 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.fsm0_good = None
     self.fsm3_good = {}
     self.fsm4_good_byte2 = None
+
+  def update_cam_stop(self, CC, CS):
+    """Final stop behind a lead handed to the camera (CAMERA_STOPS_BEHIND_LEAD): state and blend weight, at 50 Hz."""
+    CCP = CarControllerParams
+    lead = CS.acc_distance < 255
+    v = CS.out.vEgo
+    if not (CCP.CAMERA_STOPS_BEHIND_LEAD and CC.longActive) or self.nt_hold != NoTargetHold.OFF:
+      self.cam_stop = False
+      if not CC.longActive:
+        self.cam_stop_w = 0.
+    elif not self.cam_stop and lead and v < CCP.CAM_STOP_HANDOVER_SPEED:
+      self.cam_stop = True
+    elif self.cam_stop and (v > CCP.CAM_STOP_RETURN_SPEED or (not lead and v > 1.)):
+      self.cam_stop = False
+    step = (self.LONG_TX_PERIOD_NANOS * 1e-9) / CCP.CAM_STOP_BLEND_TIME
+    self.cam_stop_w = min(max(self.cam_stop_w + (step if self.cam_stop else -step), 0.), 1.)
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -236,30 +256,57 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       if CC.longActive:
         accel = min(max(actuators.accel, CarControllerParams.ACCEL_MIN), CarControllerParams.ACCEL_MAX)
         cam_accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
-        if not self.cam_brake:
-          self.cam_brake_honor = False
-        elif not self.cam_brake_honor:
-          # latched until the camera releases the brake, so OP does not flip between the two plans
-          self.cam_brake_honor = (not CarControllerParams.OP_IGNORES_MILD_CAMERA_BRAKE or
-                                  cam_accel < CarControllerParams.CAMERA_BRAKE_HONOR_BELOW)
-        if self.cam_brake_honor:
-          accel = min(accel, cam_accel)
-          self.long_mode = LongMode.BRAKE
+
+        # Final stop behind a lead done by the camera (CAMERA_STOPS_BEHIND_LEAD), blended in and out
+        self.update_cam_stop(CC, CS)
+        op_brakes_more = (actuators.longControlState == LongCtrlState.pid and
+                          ((not self.cam_brake and cam_accel >= 0. and accel < CarControllerParams.CAM_STOP_OP_BRAKE_MIN) or
+                           accel < cam_accel - CarControllerParams.CAM_STOP_OP_BRAKE_MARGIN))
+        w = 0. if op_brakes_more else self.cam_stop_w
+        self.cam_relay = w >= 1.
+        self.cam_weight = w
+
+        if self.cam_relay:
+          # the camera owns the stop: FSM3/FSM4 relayed untouched (long_mode None), its brake request answered by the car
+          accel = cam_accel
+          cam_mode = int(CS.stock_FSM3["Byte_2"]) & 0x3
+          self.long_mode = LongMode(cam_mode) if cam_mode <= LongMode.DRIVE else LongMode.COAST
+          self.cam_brake_honor = self.cam_brake
+          long_mode = None
+        elif w > 0.:
+          accel = accel + w * (cam_accel - accel)
+          self.long_mode = LongMode.BRAKE if self.cam_brake else volvocan.next_long_mode(self.long_mode, accel)
+          self.cam_brake_honor = self.cam_brake  # the camera's brake request is passed on, never spoofed here
+          long_mode = self.long_mode
         else:
-          self.long_mode = volvocan.next_long_mode(self.long_mode, accel)
-        long_mode = self.long_mode
+          if not self.cam_brake:
+            self.cam_brake_honor = False
+          elif not self.cam_brake_honor:
+            # latched until the camera releases the brake, so OP does not flip between the two plans
+            self.cam_brake_honor = (not CarControllerParams.OP_IGNORES_MILD_CAMERA_BRAKE or
+                                    cam_accel < CarControllerParams.CAMERA_BRAKE_HONOR_BELOW)
+          if self.cam_brake_honor:
+            accel = min(accel, cam_accel)
+            self.long_mode = LongMode.BRAKE
+          else:
+            self.long_mode = volvocan.next_long_mode(self.long_mode, accel)
+          long_mode = self.long_mode
       else:
         accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
         self.long_mode = LongMode.COAST
         self.cam_brake_honor = False
+        self.update_cam_stop(CC, CS)
+        self.cam_relay = False
+        self.cam_weight = 0.
         long_mode = None
       self.accel = accel
       # OP stopping the car slowly by itself (no target for the camera, e.g. red light): see OP_STOPS_WITHOUT_TARGET
-      self.op_stopping_slow = (CarControllerParams.OP_STOPS_WITHOUT_TARGET and CC.longActive and
+      self.op_stopping_slow = (CarControllerParams.OP_STOPS_WITHOUT_TARGET and CC.longActive and self.cam_stop_w == 0. and
                                self.long_mode == LongMode.BRAKE and CS.out.vEgo < CarControllerParams.NO_TARGET_STOP_SPEED)
       self.op_stopping_flag = self.op_stopping_slow and CS.out.vEgo < CarControllerParams.STOPPING_FLAG_SPEED
       # the car only acks a brake request OP sends: with OP not braking, the camera's ack has to be spoofed
-      self.spoof_cam_ack = CC.longActive and self.cam_brake and not self.cam_brake_honor and self.long_mode != LongMode.BRAKE
+      self.spoof_cam_ack = (CC.longActive and not self.cam_relay and self.cam_brake and not self.cam_brake_honor and
+                            self.long_mode != LongMode.BRAKE)
 
       if self.sng_ack_frames > 0:
         acc_check = 1
@@ -279,20 +326,20 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     # FSM4: relay each camera frame 1:1 (panda always blocks the camera's); with OP long, OP owns the brake flag
     # (set whenever OP or the camera brakes, see FSM3 above)
-    fsm4_mode = self.long_mode if CC.longActive else None
+    fsm4_mode = self.long_mode if (CC.longActive and not self.cam_relay) else None
     for stock_fsm4 in CS.stock_FSM4_frames:
       self.cam_brake = bool(int(stock_fsm4["Byte_5"]) & 0x40)
       if not self.op_owns_acc and int(stock_fsm4["Byte_2"]) != 0xFC:
         self.fsm4_good_byte2 = int(stock_fsm4["Byte_2"])
       good_byte2 = self.fsm4_good_byte2 if self.op_owns_acc else None
       can_sends.append(volvocan.create_fsm4(self.packer_pt, stock_fsm4, self.accel, fsm4_mode, good_byte2,
-                                            stopping=self.op_stopping_flag))
+                                            stopping=self.op_stopping_flag, cam_weight=self.cam_weight))
 
     # Car -> camera brake response (0x133, 0x323, 0x220, 0x299): relay 1:1 (panda always blocks the car's), masked while OP brakes
     # and the camera does not, so the camera does not see a brake it never asked for and abort ACC
     if self.cam_brake:
       self.cam_mask_frames = 0
-    elif CC.longActive and self.long_mode == LongMode.BRAKE:
+    elif CC.longActive and self.long_mode == LongMode.BRAKE and not self.cam_relay:
       self.cam_mask_frames = CarControllerParams.CAM_BRAKE_MASK_HOLD_FRAMES
     elif self.cam_mask_frames > 0:
       self.cam_mask_frames -= 1

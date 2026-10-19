@@ -336,3 +336,15 @@ def test_fsm3_standstill_when_holding():
   stock = bytes.fromhex("ea7ed4f481000000")
   out = volvocan.create_longitudinal(CANPacker(DBC), parse_fsm3(stock), -2.0, 0, LongMode.BRAKE, standstill=True)[1]
   assert out[0] == 0xEB
+
+
+def test_fsm4_blends_brake_target_into_camera():
+  stock = bytes.fromhex(STOCK_FSM4[0])  # camera braking (Byte_5 bit6)
+  fsm4 = parse("FSM4", FSM4, 33, stock)
+  cam_value = ((stock[5] << 8) | stock[6]) & 0x3FFF
+  op = volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE)[1]
+  op_value = ((op[5] << 8) | op[6]) & 0x3FFF
+  half = volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE, cam_weight=0.5)[1]
+  assert ((half[5] << 8) | half[6]) & 0x3FFF == round(op_value + 0.5 * (cam_value - op_value))
+  full = volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE, cam_weight=1.0)[1]
+  assert ((full[5] << 8) | full[6]) & 0x3FFF == cam_value and full[5] & 0x40

@@ -105,6 +105,17 @@ class CarControllerParams:
   OP_STOPS_WITHOUT_TARGET = True
   NO_TARGET_STOP_SPEED = 10. * CV.KPH_TO_MS
   STOPPING_FLAG_SPEED = 3.5 * CV.KPH_TO_MS
+  # Final stop behind a lead: below CAM_STOP_HANDOVER_SPEED with a target (FSM1), the camera does the stop like stock
+  # (route 807: stops ~3 m behind, holds with EB, our SNG resumes; OP stopped 1.7 m behind in 821). OP blends its accel
+  # and FSM4 brake value into the camera's over CAM_STOP_BLEND_TIME, then relays FSM3/FSM4 untouched; back to OP above
+  # CAM_STOP_RETURN_SPEED (or if the target is lost while moving), blended the same way. OP still brakes when the camera
+  # does not (OP accel below CAM_STOP_OP_BRAKE_MIN) or when OP wants CAM_STOP_OP_BRAKE_MARGIN more braking.
+  CAMERA_STOPS_BEHIND_LEAD = True
+  CAM_STOP_HANDOVER_SPEED = 10. * CV.KPH_TO_MS
+  CAM_STOP_RETURN_SPEED = 15. * CV.KPH_TO_MS
+  CAM_STOP_BLEND_TIME = 1.0  # s
+  CAM_STOP_OP_BRAKE_MIN = -0.3  # m/s^2
+  CAM_STOP_OP_BRAKE_MARGIN = 1.0  # m/s^2
   NO_TARGET_STANDSTILL_DELAY = 2.5  # s stopped before FSM3 reports standstill, like the camera behind a lead (807, 827)
   NO_TARGET_RELEASE_TIMEOUT = 3.0   # s for the camera to re-engage after the go
   CAMERA_BRAKE_HONOR_BELOW = -2.0  # m/s^2

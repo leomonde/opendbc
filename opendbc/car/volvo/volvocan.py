@@ -132,7 +132,7 @@ def fsm4_brake_value(accel: float, brake: bool) -> int:
 
 
 def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None, good_byte2: int | None = None,
-                stopping: bool = False):
+                stopping: bool = False, cam_weight: float = 0.):
   # relay one stock FSM4 per camera frame (Byte_0 alternates 0x55/0xAA in runs of 3-4, so no duplicates).
   # With mode (OP long), the ECM's hydraulic brake follows OP: Byte_5/Byte_6 come from OP's accel when OP brakes,
   # or when the camera brakes and OP does not; otherwise they stay the camera's.
@@ -141,6 +141,11 @@ def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None, 
   cam_brake = bool(int(stock_fsm4["Byte_5"]) & 0x40)
   if mode is not None and (op_brake or cam_brake):
     value = fsm4_brake_value(accel, op_brake)
+    if cam_weight > 0. and op_brake and cam_brake:
+      # handing the stop to the camera: blend OP's 14-bit brake target into the camera's, no step in brake pressure
+      cam_value = ((int(stock_fsm4["Byte_5"]) << 8) | int(stock_fsm4["Byte_6"])) & 0x3FFF
+      blended = int(round((value & 0x3FFF) + cam_weight * (cam_value - (value & 0x3FFF))))
+      value = (value & 0xC000) | blended
     values["Byte_5"] = value >> 8
     values["Byte_6"] = value & 0xFF
   if good_byte2 is not None:  # OP owns ACC after the camera's abort: its Byte_2 goes to 0xFC
