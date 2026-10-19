@@ -209,6 +209,19 @@ def create_cam_engine_data(packer, stock_12a, acc_state: int | None = None):
   return packer.make_can_msg("EngineData", CANBUS.cam, values)
 
 
+CAM_BUTTON_BITS = {"onoff": 0x08, "resume": 0x20}  # Byte_7 bit set, Byte_5 bit cleared (inverted copy)
+
+
+def create_cam_buttons(packer, stock_127, press: str | None = None):
+  # 0x127 to the camera; press adds a button press (On/Off or Resume) to the driver's
+  values = {s: stock_127[s] for s in BYTES}
+  if press is not None:
+    bit = CAM_BUTTON_BITS[press]
+    values["Byte_7"] = int(stock_127["Byte_7"]) | bit
+    values["Byte_5"] = int(stock_127["Byte_5"]) & ~bit
+  return packer.make_can_msg("CCButtons", CANBUS.cam, values)
+
+
 def create_radar(packer, stock_fsm1, mode: LongMode | None = None):
   # Camera FSM1 relayed; with mode, Byte_2 bit2 follows OP braking
   values = {s: stock_fsm1[s] for s in (

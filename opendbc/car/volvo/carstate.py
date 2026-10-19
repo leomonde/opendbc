@@ -128,6 +128,7 @@ class CarState(CarStateBase):
     self.stock_220_frames = all_frames(pt_cp, "wheelspeed1")
     self.stock_299_frames = all_frames(pt_cp, "NEW_MSG_299")
     self.stock_12A_frames = all_frames(pt_cp, "EngineData")
+    self.stock_127_frames = all_frames(pt_cp, "CCButtons")
 
     # TSR speed limit from camera (0 = no sign)
     tsr_raw = cam_cp.vl["FSM5"]["TSR_Speed"]
@@ -153,6 +154,7 @@ class CarState(CarStateBase):
       ("NEW_MSG_323", 25),
       ("wheelspeed1", 50),
       ("NEW_MSG_299", 50),
+      ("CCButtons", 66),
     ]
 
     cam_messages = [

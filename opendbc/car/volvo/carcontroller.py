@@ -65,6 +65,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.nt_hold = NoTargetHold.OFF
     self.nt_release_frames = 0
     self.nt_departing = False
+    self.nt_button = None  # fake press shown to the camera: 'onoff' / 'resume'
+    self.nt_button_frames = 0
     self.stopped_frames = 0
     self.op_stopping_slow = False
     self.op_stopping_flag = False
@@ -107,9 +109,12 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     can_sends += self.relay_fsm4(CC, CS)
     can_sends += self.relay_brake_acks(CC, CS)
 
-    cam_ecm_state = EcmAccState.STANDBY if (self.nt_hold == NoTargetHold.HOLD and ecm_engaged) else None
+    cam_ecm_state = self.cam_ecm_state(ecm_engaged)
     for stock_12a in CS.stock_12A_frames:
       can_sends.append(volvocan.create_cam_engine_data(self.packer_pt, stock_12a, cam_ecm_state))
+    press = self.nt_button if self.nt_button_frames * DT_CTRL < CCP.NO_TARGET_BUTTON_TIME else None
+    for stock_127 in CS.stock_127_frames:
+      can_sends.append(volvocan.create_cam_buttons(self.packer_pt, stock_127, press))
 
     if self.frame % 100 == 0 and self._params is not None:
       self._custom_acc_step = max(1, int(self._params.get("CustomAccShortPressIncrement", return_default=True) or 1))
@@ -234,19 +239,36 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       cam_cancel = bool(int(CS.stock_FSM3["Byte_2"]) & 0x20)
       if self.op_stopping_slow and not wants_to_go and cam_cancel:
         self.nt_hold = NoTargetHold.HOLD
+        self.start_cam_button('onoff')
     elif self.nt_hold == NoTargetHold.HOLD:
       if go_request or CS.out.gasPressed or self.long_mode != LongMode.BRAKE:
         self.nt_hold = NoTargetHold.RELEASE
         self.nt_release_frames = 0
         self.nt_departing = True
+        self.start_cam_button('resume')
     else:
       self.nt_release_frames += 1
       if self.nt_release_frames * DT_CTRL > CCP.NO_TARGET_RELEASE_TIMEOUT:
         self.nt_hold = NoTargetHold.OFF
 
+    self.nt_button_frames += 1  # a fake press always lasts NO_TARGET_BUTTON_TIME, like a real one
+
     # keep hiding the no-target cancel while pulling away slowly
     if not CC.longActive or CS.out.vEgo > CCP.NO_TARGET_STOP_SPEED:
       self.nt_departing = False
+
+  def start_cam_button(self, press):
+    self.nt_button = press if CCP.NO_TARGET_FAKE_BUTTONS else None
+    self.nt_button_frames = 0
+
+  def cam_ecm_state(self, ecm_engaged):
+    """ECM state shown to the camera: standby while holding, switched a moment after the fake press."""
+    if not ecm_engaged or self.nt_hold == NoTargetHold.OFF:
+      return None
+    after_press = not CCP.NO_TARGET_FAKE_BUTTONS or self.nt_button_frames * DT_CTRL >= CCP.NO_TARGET_STATE_DELAY
+    if self.nt_hold == NoTargetHold.HOLD:
+      return EcmAccState.STANDBY if after_press else None
+    return None if after_press else EcmAccState.STANDBY  # RELEASE: engaged again after the Resume press
 
   # ---- Camera -> ECM relays ----
 

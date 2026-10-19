@@ -11,11 +11,12 @@ from opendbc.safety.tests.common import CANPackerSafety
 
 class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
 
-  TX_MSGS = [[0x051, 0], [0x127, 0], [0x260, 0], [0x262, 0], [0x270, 0], [0x31A, 0], [0x246, 2], [0x133, 2], [0x323, 2], [0x220, 2], [0x299, 2], [0x12A, 2]]
+  TX_MSGS = [[0x051, 0], [0x127, 0], [0x260, 0], [0x262, 0], [0x270, 0], [0x31A, 0],
+             [0x246, 2], [0x133, 2], [0x323, 2], [0x220, 2], [0x299, 2], [0x12A, 2], [0x127, 2]]
   GAS_PRESSED_THRESHOLD = 10
   STANDSTILL_THRESHOLD = 0.1
-  RELAY_MALFUNCTION_ADDRS = {0: [0x051, 0x262, 0x31A], 2: [0x246, 0x133, 0x323, 0x220, 0x299, 0x12A]}
-  FWD_BLACKLISTED_ADDRS = {2: [0x051, 0x262, 0x31A], 0: [0x051, 0x246, 0x133, 0x323, 0x220, 0x299, 0x12A]}
+  RELAY_MALFUNCTION_ADDRS = {0: [0x051, 0x262, 0x31A], 2: [0x246, 0x133, 0x323, 0x220, 0x299, 0x12A, 0x127]}
+  FWD_BLACKLISTED_ADDRS = {2: [0x051, 0x262, 0x31A], 0: [0x051, 0x246, 0x133, 0x323, 0x220, 0x299, 0x12A, 0x127]}
 
   VOLVO_MAIN_BUS = 0
   #VOLVO_AUX_BUS = 1
@@ -71,6 +72,14 @@ class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
       self._rx(self._pcm_status_msg(False))
       self._rx(self.packer.make_can_msg_safety("EngineData", self.VOLVO_MAIN_BUS, {"ACC_State_ECM": state}))
       self.assertEqual(engaged, self.safety.get_controls_allowed(), f"{state=}")
+
+  def test_buttons_to_camera_not_checked(self):
+    # the camera's copy of 0x127 carries the driver's presses, also with cruise off; the car's copy stays checked
+    self.safety.set_controls_allowed(False)
+    self._rx(self._pcm_status_msg(False))
+    onoff = {"ACCOnOffBtn": 1, "ACCOnOffBtnInv": 0, "ACCResumeBtnInv": 1, "ACCSetBtnInv": 1, "ACCMinusBtnInv": 1}
+    self.assertTrue(self._tx(self.packer.make_can_msg_safety("CCButtons", self.VOLVO_CAM_BUS, onoff)))
+    self.assertFalse(self._tx(self.packer.make_can_msg_safety("CCButtons", self.VOLVO_MAIN_BUS, onoff)))
 
   def test_camera_fsm0_does_not_engage(self):
     # the camera's FSM0 is not an engagement source anymore

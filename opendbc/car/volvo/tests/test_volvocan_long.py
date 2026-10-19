@@ -348,3 +348,15 @@ def test_fsm4_blends_brake_target_into_camera():
   assert ((half[5] << 8) | half[6]) & 0x3FFF == round(op_value + 0.5 * (cam_value - op_value))
   full = volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE, cam_weight=1.0)[1]
   assert ((full[5] << 8) | full[6]) & 0x3FFF == cam_value and full[5] & 0x40
+
+
+MSG_127 = 0x127
+STOCK_127 = bytes.fromhex("88108361a7ff0000")  # route 823, no press
+
+
+@pytest.mark.parametrize("press,b5,b7", [(None, 0xFF, 0x00), ("onoff", 0xF7, 0x08), ("resume", 0xDF, 0x20)])
+def test_buttons_to_camera(press, b5, b7):
+  addr, dat, bus = volvocan.create_cam_buttons(CANPacker(DBC), parse("CCButtons", MSG_127, 66, STOCK_127), press)
+  assert (addr, bus) == (MSG_127, 2)
+  assert dat[5] == b5 and dat[7] == b7  # same bytes as a real press (route 823)
+  assert dat[:5] == STOCK_127[:5] and dat[6] == STOCK_127[6]
