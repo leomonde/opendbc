@@ -94,6 +94,11 @@ class CarControllerParams:
   # the lane while braking, where the stock ACC keeps braking hard behind it. Once the camera asks below
   # CAMERA_BRAKE_HONOR_BELOW during a brake request, OP honors it (min of both) until the camera releases the brake.
   OP_IGNORES_MILD_CAMERA_BRAKE = True
+  # The spoofed 0x299 ack follows the camera's own FSM4 brake target like the ECM's: in stock 808 the ECM drops the
+  # ack (F7 -> FF) once the camera's 14-bit target rises to ~13280+ (about -0.2 m/s^2 or less braking) while bit6 is
+  # still set, and only then does the camera release bit6. Holding the ack there made the camera wait with bit6 set
+  # and abort ~3 s later (routes 082a/082b, FSM0 0x10, then a latched 0x04).
+  CAM_ACK_RELEASE_VALUE = 13280
   # OP stopping the car with no target (red light, experimental mode): the camera cancels ACC at ~2.5 km/h (FSM3
   # Byte_2 bit5, route 827). Below NO_TARGET_STOP_SPEED OP hides that cancel from the ECM, and below STOPPING_FLAG_SPEED
   # it sets the FSM4 "stopping" flag like the camera does behind a lead. OP keeps the hydraulic brake while stopped.

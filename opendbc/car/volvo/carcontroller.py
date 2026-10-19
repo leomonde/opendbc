@@ -56,6 +56,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.cam_brake = False
     self.cam_brake_honor = False
     self.spoof_cam_ack = False
+    self.cam_brake_target = 0
     self.op_stopping_slow = False
     self.nt_hold = NoTargetHold.OFF
     self.nt_release_frames = 0
@@ -305,6 +306,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     for stock_323 in CS.stock_323_frames:
       can_sends.append(volvocan.create_cam_brake_status(self.packer_pt, stock_323, mask_323))
     spoof_220, spoof_299 = (self.spoof_cam_ack and addr in masked for addr in (0x220, 0x299))
+    if CS.stock_FSM4_frames:  # the camera's brake target, see CAM_ACK_RELEASE_VALUE
+      last_fsm4 = CS.stock_FSM4_frames[-1]
+      self.cam_brake_target = ((int(last_fsm4["Byte_5"]) << 8) | int(last_fsm4["Byte_6"])) & 0x3FFF
+    spoof_299 = spoof_299 and self.cam_brake_target < CarControllerParams.CAM_ACK_RELEASE_VALUE
     for stock_220 in CS.stock_220_frames:
       can_sends.append(volvocan.create_cam_wheel_status(self.packer_pt, stock_220, mask_220, spoof_220))
     for stock_299 in CS.stock_299_frames:
