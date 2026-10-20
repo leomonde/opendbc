@@ -91,6 +91,8 @@ class CarState(CarStateBase):
     # button presses
     ret.leftBlinker = pt_cp.vl["MiscCarInfo"]["TurnSignal"] == 1
     ret.rightBlinker = pt_cp.vl["MiscCarInfo"]["TurnSignal"] == 3
+    # [test] virtual red light trigger
+    ret.genericToggle = bool(pt_cp.vl["Lights"]["High_Beam"]) or pt_cp.vl["Accessories_01"]["Wipers"] != 0
 
     # Synthesize one accelCruise/decelCruise per frame from pending delta.
     # Suppressed after ICBM sends a button to avoid feedback into v_cruise_kph.
@@ -155,6 +157,8 @@ class CarState(CarStateBase):
       ("wheelspeed1", 50),
       ("NEW_MSG_299", 50),
       ("CCButtons", 66),
+      ("Lights", 5),
+      ("Accessories_01", 20),
     ]
 
     cam_messages = [
