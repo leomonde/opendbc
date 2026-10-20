@@ -6,7 +6,7 @@
 #define VOLVO_EUCD_AccPedal      0x020  // RX, gas pedal
 #define VOLVO_EUCD_FSM0          0x051  // TX by OP, camera's relayed; ACC state
 #define VOLVO_EUCD_EngineData    0x12A  // RX, ECM ACC state; TX by OP to camera
-#define VOLVO_EUCD_VehicleSpeed1 0x148  // RX, vehicle speed
+#define VOLVO_EUCD_VehicleSpeed1 0x148  // RX, vehicle speed; TX by OP to camera
 #define VOLVO_EUCD_Brake_Info    0x20a  // RX, driver brake pressed
 #define VOLVO_EUCD_CCButtons     0x127  // TX by OP, CC buttons; driver's relayed to camera
 #define VOLVO_EUCD_PSCM1         0x246  // TX by OP to camera, PSCM state
@@ -170,6 +170,7 @@ static safety_config volvo_init(uint16_t param) {
     {VOLVO_EUCD_BRAKE_LEVEL, VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_BRAKE_ACK,   VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_WHEELSPEED1, VOLVO_CAM_BUS, 8, .check_relay = true},
+    {VOLVO_EUCD_VehicleSpeed1, VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_BRAKE_REQ_ACK, VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_EngineData,  VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_CCButtons,   VOLVO_CAM_BUS, 8, .check_relay = true},

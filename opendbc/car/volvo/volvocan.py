@@ -181,14 +181,29 @@ def create_cam_brake_level(packer, stock_133, frozen_level: int | None):
   return packer.make_can_msg("NEW_MSG_133", CANBUS.cam, values)
 
 
-def create_cam_wheel_status(packer, stock_220, mask: bool, spoof: bool = False):
+def create_cam_wheel_status(packer, stock_220, mask: bool, spoof: bool = False, min_speed_kph: float | None = None):
   # 0x220 to the camera; Byte_2 bit2 (brake request active): masked clears it, spoofed sets it
   values = {s: stock_220[s] for s in BYTES}
   if mask:
     values["Byte_2"] = int(stock_220["Byte_2"]) & ~0x04
   elif spoof:
     values["Byte_2"] = int(stock_220["Byte_2"]) | 0x04
+  if min_speed_kph is not None:
+    # rear wheel speeds (Byte_4/5, Byte_6/7): 0.01 km/h, offset -327.68
+    floor = round((min_speed_kph + 327.68) / 0.01)
+    for hi, lo in (("Byte_4", "Byte_5"), ("Byte_6", "Byte_7")):
+      raw = max((int(values[hi]) << 8) | int(values[lo]), floor)
+      values[hi], values[lo] = raw >> 8, raw & 0xFF
   return packer.make_can_msg("wheelspeed1", CANBUS.cam, values)
+
+
+def create_cam_vehicle_speed(packer, stock_148, min_speed_kph: float | None = None):
+  # 0x148 to the camera; min_speed_kph raises VehicleSpeed (Byte_6/7, 0.01 km/h)
+  values = {s: stock_148[s] for s in BYTES}
+  if min_speed_kph is not None:
+    raw = max((int(values["Byte_6"]) << 8) | int(values["Byte_7"]), round(min_speed_kph / 0.01))
+    values["Byte_6"], values["Byte_7"] = raw >> 8, raw & 0xFF
+  return packer.make_can_msg("VehicleSpeed1", CANBUS.cam, values)
 
 
 def create_cam_brake_request_ack(packer, stock_299, mask: bool, spoof: bool = False):

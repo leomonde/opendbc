@@ -118,6 +118,14 @@ BO_ 328 VehicleSpeed1: 8 XXX
  SG_ BrakePressure2 : 33|10@0+ (1,0) [0|63] "" XXX
  SG_ COUNTER : 37|4@0+ (1,0) [0|15] "" XXX
  SG_ VehicleSpeed : 55|16@0+ (0.01,0) [0|65535] "" XXX
+ SG_ Byte_0 : 7|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_1 : 15|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_2 : 23|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_3 : 31|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_4 : 39|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_5 : 47|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_6 : 55|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_7 : 63|8@0+ (1,0) [0|255] "" XXX
 
 BO_ 336 NEW_MSG_8: 8 XXX
  SG_ NEW_SIGNAL_1 : 3|12@0+ (1,0) [0|4095] "" XXX

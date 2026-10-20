@@ -5,6 +5,7 @@ try:
   from openpilot.common.params import Params
 except ImportError:
   Params = None
+from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.lateral import apply_std_steer_angle_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.volvo import volvocan
@@ -70,6 +71,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.stopped_frames = 0
     self.op_stopping_slow = False
     self.op_stopping_flag = False
+    self.nt_speed_floor = False  # camera shown NO_TARGET_SPEED_FLOOR
+    self.experimental_mode = self._params.get_bool("ExperimentalMode") if self._params is not None else False
 
     # Brake acks to the camera
     self.spoof_cam_ack = False
@@ -118,6 +121,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     if self.frame % 100 == 0 and self._params is not None:
       self._custom_acc_step = max(1, int(self._params.get("CustomAccShortPressIncrement", return_default=True) or 1))
+      self.experimental_mode = self._params.get_bool("ExperimentalMode")
     CS._custom_acc_step = self._custom_acc_step
 
     icbm_sends = IntelligentCruiseButtonManagementInterface.update(self, CC_SP, CS, self.packer_pt, self.frame, self.last_button_frame)
@@ -257,6 +261,14 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if not CC.longActive or CS.out.vEgo > CCP.NO_TARGET_STOP_SPEED:
       self.nt_departing = False
 
+    # speed floor to the camera: experimental mode only, off at a camera target or a pedal
+    floor_ok = (CCP.OP_STOPS_WITHOUT_TARGET and CCP.NO_TARGET_SPEED_FLOOR is not None and self.experimental_mode and
+                CC.longActive and CS.acc_distance == 255 and not CS.out.brakePressed and not CS.out.gasPressed)
+    if not floor_ok or CS.out.vEgo * CV.MS_TO_KPH > CCP.NO_TARGET_SPEED_FLOOR:
+      self.nt_speed_floor = False
+    elif self.op_stopping_slow:
+      self.nt_speed_floor = True
+
   def start_cam_button(self, press):
     self.nt_button = press if CCP.NO_TARGET_FAKE_BUTTONS else None
     self.nt_button_frames = 0
@@ -339,7 +351,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     else:
       acc_check = int(CS.stock_FSM3["ACC_Check"])
 
-    nt_standstill = self.nt_hold == NoTargetHold.HOLD and self.stopped_frames * DT_CTRL >= CCP.NO_TARGET_STANDSTILL_DELAY
+    nt_standstill = (self.nt_hold == NoTargetHold.HOLD or self.nt_speed_floor) and self.stopped_frames * DT_CTRL >= CCP.NO_TARGET_STANDSTILL_DELAY
     hide_cancel = self.op_stopping_slow or self.nt_departing or self.nt_hold != NoTargetHold.OFF
     return [
       volvocan.create_radar(self.packer_pt, CS.stock_FSM1),
@@ -405,7 +417,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
   # ---- Car -> camera relays ----
 
   def relay_brake_acks(self, CC, CS):
-    """Brake acks to the camera: masked while OP brakes alone, spoofed while OP ignores the camera's request."""
+    """Brake acks to the camera: masked while OP brakes alone, spoofed while OP ignores the camera's request.
+    Also the speed (0x148, 0x220), raised to the floor at a no-target stop."""
     if self.cam_brake:
       self.cam_mask_frames = 0
     elif CC.longActive and self.long_mode == LongMode.BRAKE and not self.cam_relay:
@@ -421,7 +434,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       self.cam_brake_target = ((int(last_fsm4["Byte_5"]) << 8) | int(last_fsm4["Byte_6"])) & 0x3FFF
     spoof_299 = spoof_299 and self.cam_brake_target < CCP.CAM_ACK_RELEASE_VALUE  # ack drops like the ECM's
 
-    sends = []
+    floor = CCP.NO_TARGET_SPEED_FLOOR if self.nt_speed_floor else None
+    sends = [volvocan.create_cam_vehicle_speed(self.packer_pt, stock_148, floor) for stock_148 in CS.stock_148_frames]
     for stock_133 in CS.stock_133_frames:
       if not mask_133:
         self.brake_level_133 = int(stock_133["Byte_1"]) & 0x7F
@@ -429,7 +443,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     for stock_323 in CS.stock_323_frames:
       sends.append(volvocan.create_cam_brake_status(self.packer_pt, stock_323, mask_323))
     for stock_220 in CS.stock_220_frames:
-      sends.append(volvocan.create_cam_wheel_status(self.packer_pt, stock_220, mask_220, spoof_220))
+      sends.append(volvocan.create_cam_wheel_status(self.packer_pt, stock_220, mask_220, spoof_220, floor))
     for stock_299 in CS.stock_299_frames:
       sends.append(volvocan.create_cam_brake_request_ack(self.packer_pt, stock_299, mask_299, spoof_299))
     return sends

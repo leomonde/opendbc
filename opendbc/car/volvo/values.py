@@ -95,6 +95,9 @@ class CarControllerParams:
   NO_TARGET_STANDSTILL_DELAY = 2.5  # s stopped before FSM3 reports standstill
   NO_TARGET_RELEASE_TIMEOUT = 3.0   # s for the camera to re-engage after the go
   NO_TARGET_FAKE_BUTTONS = True  # show the camera an On/Off press at the hold and a Resume press at the go
+  # the camera cancels ~1 s below 5 km/h with no target (routes 827/828/832/835): show it this speed instead.
+  # Only in experimental mode, with no camera target and no pedal.
+  NO_TARGET_SPEED_FLOOR = 6.  # km/h, None = off
   NO_TARGET_BUTTON_TIME = 0.15  # s, a real press
   NO_TARGET_STATE_DELAY = 0.04  # s from the press to the ECM state change, as the real ECM
 

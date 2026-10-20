@@ -128,6 +128,7 @@ class CarState(CarStateBase):
     self.stock_133_frames = all_frames(pt_cp, "NEW_MSG_133")
     self.stock_323_frames = all_frames(pt_cp, "NEW_MSG_323")
     self.stock_220_frames = all_frames(pt_cp, "wheelspeed1")
+    self.stock_148_frames = all_frames(pt_cp, "VehicleSpeed1")
     self.stock_299_frames = all_frames(pt_cp, "NEW_MSG_299")
     self.stock_12A_frames = all_frames(pt_cp, "EngineData")
     self.stock_127_frames = all_frames(pt_cp, "CCButtons")
