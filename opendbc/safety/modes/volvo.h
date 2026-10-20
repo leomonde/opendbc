@@ -5,10 +5,10 @@
 // Safety-relevant CAN messages for EUCD platform.
 #define VOLVO_EUCD_AccPedal      0x020  // RX, gas pedal
 #define VOLVO_EUCD_FSM0          0x051  // TX by OP, camera's relayed; ACC state
-#define VOLVO_EUCD_EngineData    0x12A  // RX, ECM ACC state; TX by OP to camera
+#define VOLVO_EUCD_EngineData    0x12A  // RX, ECM ACC state
 #define VOLVO_EUCD_VehicleSpeed1 0x148  // RX, vehicle speed
 #define VOLVO_EUCD_Brake_Info    0x20a  // RX, driver brake pressed
-#define VOLVO_EUCD_CCButtons     0x127  // TX by OP, CC buttons; driver's relayed to camera
+#define VOLVO_EUCD_CCButtons     0x127  // TX by OP, CC buttons
 #define VOLVO_EUCD_PSCM1         0x246  // TX by OP to camera, PSCM state
 #define VOLVO_EUCD_BRAKE_LEVEL   0x133  // TX by OP to camera, brake level
 #define VOLVO_EUCD_BRAKE_ACK     0x323  // TX by OP to camera, brake applied
@@ -94,8 +94,8 @@ static bool volvo_tx_hook(const CANPacket_t *msg) {
   bool violation = false;
   int addr = msg->addr;
 
-  // Safety check for CC button signals sent to the car (the camera's copy carries the driver's presses)
-  if ((addr == VOLVO_EUCD_CCButtons) && (msg->bus == VOLVO_MAIN_BUS)) {
+  // Safety check for CC button signals.
+  if (addr == VOLVO_EUCD_CCButtons) {
     // Violation if resume button is pressed while controls not allowed, or
     // if cancel button is pressed when cruise isn't engaged.
     violation |= !cruise_engaged_prev && (GET_BIT(msg, 59U) || !(GET_BIT(msg, 43U)));  // Signals: ACCOnOffBtn, ACCOnOffBtnInv (cancel)
@@ -171,8 +171,6 @@ static safety_config volvo_init(uint16_t param) {
     {VOLVO_EUCD_BRAKE_ACK,   VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_WHEELSPEED1, VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_BRAKE_REQ_ACK, VOLVO_CAM_BUS, 8, .check_relay = true},
-    {VOLVO_EUCD_EngineData,  VOLVO_CAM_BUS, 8, .check_relay = true},
-    {VOLVO_EUCD_CCButtons,   VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_FSM2,      VOLVO_MAIN_BUS, 8, .check_relay = true},   // OP replaces stock LKA command
     // FSM1/FSM3: camera's pass through while OP does not control (relay delay faults the ECM)
     {VOLVO_EUCD_FSM1,      VOLVO_MAIN_BUS, 8, .check_relay = false},

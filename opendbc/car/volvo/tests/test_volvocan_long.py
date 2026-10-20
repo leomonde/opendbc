@@ -303,41 +303,6 @@ def test_299_spoofs_ack(stock):
   assert dat[:5] == stock[:5] and dat[6:] == stock[6:]
 
 
-# camera FSM3 when it cancels ACC with no target at 2.5 km/h (route 827): data 0xF5, type 0x21
-NO_TARGET_CANCEL = [bytes.fromhex("ea7ef5f481000000"), bytes.fromhex("407e21f400000000")]
-
-
-@pytest.mark.parametrize("stock", NO_TARGET_CANCEL)
-def test_fsm3_hides_no_target_cancel(stock):
-  fsm3 = parse_fsm3(stock)
-  out = volvocan.create_longitudinal(CANPacker(DBC), fsm3, -0.3, 0, LongMode.BRAKE, hide_no_target_cancel=True)[1]
-  assert out[2] == (stock[2] & 0xDC) | LongMode.BRAKE  # bit5 cleared: 0xD4 data / 0x00 type
-  out = volvocan.create_longitudinal(CANPacker(DBC), fsm3, -0.3, 0, LongMode.BRAKE)[1]
-  assert out[2] & 0x20  # passed on when not stopping
-
-
-def test_fsm4_stopping_flag():
-  stock = bytes.fromhex(STOCK_FSM4[0])
-  fsm4 = parse("FSM4", FSM4, 33, stock)
-  assert volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE, stopping=True)[1][1] == stock[1] | 0x08
-  assert volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE)[1][1] == stock[1]
-
-
-@pytest.mark.parametrize("state", [None, EcmAccState.STANDBY, EcmAccState.ENGAGED])
-def test_engine_data_relay_to_camera(state):
-  stock = bytes([0xEA, 0x00, 0xC7, 0xF8, 0xB7, 0xF8, 0xE5, 0x7A])  # ECM engaged (bits 5:4 = 3)
-  addr, dat, bus = volvocan.create_cam_engine_data(CANPacker(DBC), parse("EngineData", ENGINE_DATA, 66, stock), state)
-  assert (addr, bus) == (ENGINE_DATA, 2)
-  want = stock[4] if state is None else (stock[4] & ~0x30) | (state << 4)
-  assert dat[4] == want and dat[:4] == stock[:4] and dat[5:] == stock[5:]
-
-
-def test_fsm3_standstill_when_holding():
-  stock = bytes.fromhex("ea7ed4f481000000")
-  out = volvocan.create_longitudinal(CANPacker(DBC), parse_fsm3(stock), -2.0, 0, LongMode.BRAKE, standstill=True)[1]
-  assert out[0] == 0xEB
-
-
 def test_fsm4_blends_brake_target_into_camera():
   stock = bytes.fromhex(STOCK_FSM4[0])  # camera braking (Byte_5 bit6)
   fsm4 = parse("FSM4", FSM4, 33, stock)
@@ -348,15 +313,3 @@ def test_fsm4_blends_brake_target_into_camera():
   assert ((half[5] << 8) | half[6]) & 0x3FFF == round(op_value + 0.5 * (cam_value - op_value))
   full = volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE, cam_weight=1.0)[1]
   assert ((full[5] << 8) | full[6]) & 0x3FFF == cam_value and full[5] & 0x40
-
-
-MSG_127 = 0x127
-STOCK_127 = bytes.fromhex("88108361a7ff0000")  # route 823, no press
-
-
-@pytest.mark.parametrize("press,b5,b7", [(None, 0xFF, 0x00), ("onoff", 0xF7, 0x08), ("resume", 0xDF, 0x20)])
-def test_buttons_to_camera(press, b5, b7):
-  addr, dat, bus = volvocan.create_cam_buttons(CANPacker(DBC), parse("CCButtons", MSG_127, 66, STOCK_127), press)
-  assert (addr, bus) == (MSG_127, 2)
-  assert dat[5] == b5 and dat[7] == b7  # same bytes as a real press (route 823)
-  assert dat[:5] == STOCK_127[:5] and dat[6] == STOCK_127[6]

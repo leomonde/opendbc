@@ -35,14 +35,6 @@ class EcmAccState(IntEnum):
   ENGAGED = 3
 
 
-class NoTargetHold(IntEnum):
-  """Red-light stop with no target: HOLD shows the camera the ECM in standby while the ECM stays engaged;
-  RELEASE shows it engaged again until the camera re-engages."""
-  OFF = 0
-  HOLD = 1
-  RELEASE = 2
-
-
 class CarControllerParams:
   # Lateral
   ANGLE_LIMITS: AngleSteeringLimits = AngleSteeringLimits(90,
@@ -87,16 +79,6 @@ class CarControllerParams:
   CAM_STOP_TRANSITION_TIME = 1.0  # s, blend between OP and camera
   OP_BRAKE_OVERRIDE_ACCEL = -0.3  # m/s^2, OP brakes if it wants less than this and the camera does not brake
   OP_BRAKE_OVERRIDE_MARGIN = 1.0  # m/s^2, OP brakes if it wants this much more than the camera
-
-  # Red-light stop with no target (off: the camera locked up, ACC unavailable for the drive)
-  OP_STOPS_WITHOUT_TARGET = False
-  NO_TARGET_STOP_SPEED = 10. * CV.KPH_TO_MS  # hide the camera's no-target cancel below this
-  STOPPING_FLAG_SPEED = 3.5 * CV.KPH_TO_MS   # FSM4 "stopping" flag below this
-  NO_TARGET_STANDSTILL_DELAY = 2.5  # s stopped before FSM3 reports standstill
-  NO_TARGET_RELEASE_TIMEOUT = 3.0   # s for the camera to re-engage after the go
-  NO_TARGET_FAKE_BUTTONS = True  # show the camera an On/Off press at the hold and a Resume press at the go
-  NO_TARGET_BUTTON_TIME = 0.15  # s, a real press
-  NO_TARGET_STATE_DELAY = 0.04  # s from the press to the ECM state change, as the real ECM
 
   # Keep the ECM engaged on the camera's last good frames after a camera abort (latched a fault in testing)
   OP_OWNS_ACC_AFTER_CAMERA_ABORT = False
