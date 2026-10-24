@@ -66,11 +66,21 @@ class CarControllerParams:
   # Brake acks to the camera (0x220 Byte_2 bit2, 0x299 Byte_5 bit3): masked while OP brakes alone, and this long after
   CAM_BRAKE_MASK_MSGS = frozenset({0x220, 0x299})
   CAM_BRAKE_MASK_HOLD_FRAMES = int(1.0 / DT_CTRL)
-
-  # Camera brake requests: OP ignores mild ones (spoofed ack), honors them below CAMERA_BRAKE_HONOR_BELOW
-  OP_IGNORES_MILD_CAMERA_BRAKE = True
-  CAMERA_BRAKE_HONOR_BELOW = -2.0  # m/s^2
   CAM_ACK_RELEASE_VALUE = 13280  # spoofed 0x299 ack drops when the camera's FSM4 target reaches this (no braking)
+
+  # Camera brake requests: OP ignores mild ones (spoofed ack), follows them at once below this, latched while it brakes
+  CAMERA_BRAKE_HONOR_BELOW = -2.0  # m/s^2
+
+  # The camera aborts (0x10) after ~3-6 s of its FSM3 mode 0 while the car gets another mode (routes 821-854),
+  # so FSM3 shows mode 0 whenever the camera does (mode bits only: FSM4 decides the hydraulic brake).
+
+  # BRAKE mode thresholds follow what coasting gives on the slope: lower uphill (route 858 braked on a 5° slope),
+  # higher downhill (route 85a coasted 3-7 km/h over the limit on a 1.5° descent)
+  COAST_PITCH_GAIN = 5.65  # m/s^2 per sin(pitch), openpilot's coast fit
+  DOWNHILL_BRAKE_OFFSET_MAX = 0.15  # m/s^2, keeps BRAKE exit (-0.15 + this) at or below 0
+  # Uphill, BRAKE is entered this much further below coast: OP's request overshoots the coast cap a little
+  # (route 85b, 5° climb: -1.1 vs -0.8 coast, hydraulic brake jerks)
+  UPHILL_BRAKE_ENTER_EXTRA = 0.6  # fraction of the uphill offset
 
   # Camera final stop behind a lead
   CAMERA_STOPS_BEHIND_LEAD = True
@@ -79,9 +89,6 @@ class CarControllerParams:
   CAM_STOP_TRANSITION_TIME = 1.0  # s, blend between OP and camera
   OP_BRAKE_OVERRIDE_ACCEL = -0.3  # m/s^2, OP brakes if it wants less than this and the camera does not brake
   OP_BRAKE_OVERRIDE_MARGIN = 1.0  # m/s^2, OP brakes if it wants this much more than the camera
-
-  # Keep the ECM engaged on the camera's last good frames after a camera abort (latched a fault in testing)
-  OP_OWNS_ACC_AFTER_CAMERA_ABORT = False
 
   def __init__(self, CP):
     pass

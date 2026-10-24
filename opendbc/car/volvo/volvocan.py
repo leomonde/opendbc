@@ -60,15 +60,17 @@ def create_lka_msg(packer, apply_steer: float, steer_direction: int):
   return packer.make_can_msg("FSM2", 0, values)
 
 
-def next_long_mode(mode: LongMode, accel: float) -> LongMode:
+def next_long_mode(mode: LongMode, accel: float, brake_offset: float = 0.) -> LongMode:
+  # brake_offset: slope part of the coast accel; the BRAKE thresholds move by it (down uphill, up downhill)
   CCP = CarControllerParams
   if mode == LongMode.BRAKE:
-    if accel <= CCP.BRAKE_EXIT:
+    if accel <= CCP.BRAKE_EXIT + brake_offset:
       return LongMode.BRAKE
   elif mode == LongMode.DRIVE:
     if accel >= CCP.DRIVE_EXIT:
       return LongMode.DRIVE
-  if accel < CCP.BRAKE_ENTER:
+  enter_offset = brake_offset * (1. + CCP.UPHILL_BRAKE_ENTER_EXTRA) if brake_offset < 0. else brake_offset
+  if accel < CCP.BRAKE_ENTER + enter_offset:
     return LongMode.BRAKE
   if accel > CCP.DRIVE_ENTER:
     return LongMode.DRIVE
@@ -84,9 +86,8 @@ def fsm3_traction(accel: float, mode: LongMode) -> int:
   return min(max(round(57 * accel - 15), -127), -1) & 0xFF
 
 
-def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | None = None, good_fsm3=None):
+def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | None = None):
   # Camera FSM3 with OP's accel and ACC_Check; with mode, also OP's mode (Byte_2 bits 1:0) and traction.
-  # good_fsm3: the camera's last good frame, held toward the ECM.
   values = {s: stock_fsm3[s] for s in (
     "ACC_Standstill",
     "Byte_01",
@@ -105,11 +106,6 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | N
   if mode is not None:
     values["Byte_2"] = (int(stock_fsm3["Byte_2"]) & 0xFC) | int(mode)
     values["Byte_3"] = fsm3_traction(accel, mode)
-  if good_fsm3 is not None:
-    values |= {s: good_fsm3[s] for s in ("ACC_Standstill", "Byte_01", "Byte_02")}
-    base = 0xD4 if int(stock_fsm3["Byte_4"]) == 0x81 else 0x00  # data / type frame
-    values["Byte_2"] = base | (int(mode) if mode is not None else int(good_fsm3["Byte_2"]) & 0x03)
-    values["Byte_6"] = 0
   return packer.make_can_msg("FSM3", 0, values)
 
 
@@ -120,8 +116,7 @@ def fsm4_brake_value(accel: float, brake: bool) -> int:
   return 0x8000 | (0x4000 if brake else 0) | int(round(float(np.interp(accel, bp, v))))
 
 
-def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None, good_byte2: int | None = None,
-                cam_weight: float = 0.):
+def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None, cam_weight: float = 0.):
   # Camera FSM4 relayed per frame; with mode, the brake flag and target follow OP's accel when either side brakes.
   values = {s: stock_fsm4[s] for s in ("Byte_0", "Byte_1", "Byte_2", "ACC_LeadSpeed", "Byte_4", "Byte_5", "Byte_6", "Byte_7")}
   op_brake = mode == LongMode.BRAKE
@@ -135,19 +130,12 @@ def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None, 
       value = (value & 0xC000) | blended
     values["Byte_5"] = value >> 8
     values["Byte_6"] = value & 0xFF
-  if good_byte2 is not None:
-    values["Byte_2"] = good_byte2
   return packer.make_can_msg("FSM4", 0, values)
 
 
-def create_fsm0(packer, stock_fsm0, ecm_engaged: bool, good_fsm0=None):
+def create_fsm0(packer, stock_fsm0, ecm_engaged: bool):
   # Camera FSM0 relayed per frame, never ACC enabled without the ECM engaged.
-  # good_fsm0: the camera's last good state, held toward the ECM (lead bit stays live).
   values = {s: stock_fsm0[s] for s in BYTES}
-  if good_fsm0 is not None:
-    values["Byte_2"] = (int(good_fsm0["Byte_2"]) & ~0x01) | (int(stock_fsm0["Byte_2"]) & 0x01)
-    values["Byte_3"] = good_fsm0["Byte_3"]
-    values["Byte_7"] = int(stock_fsm0["Byte_7"]) & ~0x04
   if not ecm_engaged:
     values["Byte_2"] = int(values["Byte_2"]) & ~0x04
   return packer.make_can_msg("FSM0", 0, values)

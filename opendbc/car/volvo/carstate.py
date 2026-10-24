@@ -119,6 +119,7 @@ class CarState(CarStateBase):
     self.pscm_stock_values = pt_cp.vl["PSCM1"]
     self.stock_FSM1 = copy.copy(cam_cp.vl["FSM1"])
     self.stock_FSM3 = copy.copy(cam_cp.vl["FSM3"])
+    self.cam_fsm3_mode = int(self.stock_FSM3["Byte_2"]) & 0x3  # camera's FSM3 mode (LongMode)
     self.ACC_Check = cam_cp.vl["FSM3"]["ACC_Check"]
     # all frames this cycle of the messages carcontroller relays 1:1
     self.stock_FSM0_frames = all_frames(cam_cp, "FSM0")

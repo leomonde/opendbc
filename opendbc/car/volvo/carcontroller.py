@@ -1,3 +1,5 @@
+import math
+
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL, structs
 
@@ -66,13 +68,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.cam_mask_frames = 0
     self.brake_level_133 = 0
 
-    # OP holding the camera's last good frames toward the ECM
-    self.op_owns_acc = False
-    self.cam_was_enabled = False
-    self.fsm0_good = None
-    self.fsm3_good = {}
-    self.fsm4_good_byte2 = None
-
   def update(self, CC, CC_SP, CS, now_nanos):
     actuators = CC.actuators
     can_sends = []
@@ -84,14 +79,14 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       can_sends += self.lateral(CC, CS)
 
     self.resume_buttons(CC, CS, can_sends)
-    good_fsm3 = self.relay_fsm0(CC, CS, can_sends, CS.ecm_acc_engaged)
+    self.relay_fsm0(CS, can_sends, CS.ecm_acc_engaged)
 
     if now_nanos >= self.next_long_tx_nanos:
       next_tx = self.next_long_tx_nanos + self.LONG_TX_PERIOD_NANOS
       if self.next_long_tx_nanos == 0 or next_tx <= now_nanos:
         next_tx = now_nanos + self.LONG_TX_PERIOD_NANOS
       self.next_long_tx_nanos = next_tx
-      can_sends += self.longitudinal(CC, CS, good_fsm3)
+      can_sends += self.longitudinal(CC, CS)
 
     can_sends += self.relay_fsm4(CC, CS)
     can_sends += self.relay_brake_acks(CC, CS)
@@ -190,27 +185,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
   # ---- Camera -> ECM relays ----
 
-  def relay_fsm0(self, CC, CS, can_sends, ecm_engaged):
-    """FSM0 relayed 1:1; the camera's last good frame while OP owns ACC. Returns the FSM3 frame to hold, if any."""
-    if not ecm_engaged:
-      self.cam_was_enabled = False
+  def relay_fsm0(self, CS, can_sends, ecm_engaged):
+    """FSM0 relayed 1:1, never ACC enabled without the ECM engaged."""
     for stock_fsm0 in CS.stock_FSM0_frames:
-      cam_ok = bool(int(stock_fsm0["Byte_2"]) & 0x04) and int(stock_fsm0["Byte_3"]) == 0
-      if cam_ok:
-        self.fsm0_good = stock_fsm0
-        self.cam_was_enabled = self.cam_was_enabled or ecm_engaged
-      takeover = CCP.OP_OWNS_ACC_AFTER_CAMERA_ABORT and self.CP.openpilotLongitudinalControl and self.cam_was_enabled
-      self.op_owns_acc = CC.enabled and ecm_engaged and not cam_ok and self.fsm0_good is not None and takeover
-      can_sends.append(volvocan.create_fsm0(self.packer_pt, stock_fsm0, ecm_engaged, self.fsm0_good if self.op_owns_acc else None))
-    if not (ecm_engaged and CC.enabled):
-      self.op_owns_acc = False
-
-    # last good FSM3 per frame kind (data / type)
-    fsm3_kind = int(CS.stock_FSM3["Byte_4"]) == 0x81
-    if not self.op_owns_acc:
-      if int(CS.stock_FSM3["Byte_6"]) == 0 and (int(CS.stock_FSM3["Byte_2"]) & 0xFC) not in (0xFC, 0xDC):
-        self.fsm3_good[fsm3_kind] = CS.stock_FSM3
-    return self.fsm3_good.get(fsm3_kind) if self.op_owns_acc else None
+      can_sends.append(volvocan.create_fsm0(self.packer_pt, stock_fsm0, ecm_engaged))
 
   def relay_fsm4(self, CC, CS):
     """FSM4 relayed 1:1; with OP long, OP sets the brake flag and target."""
@@ -218,15 +196,12 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     fsm4_mode = self.long_mode if (CC.longActive and not self.cam_relay) else None
     for stock_fsm4 in CS.stock_FSM4_frames:
       self.cam_brake = bool(int(stock_fsm4["Byte_5"]) & 0x40)
-      if not self.op_owns_acc and int(stock_fsm4["Byte_2"]) != 0xFC:
-        self.fsm4_good_byte2 = int(stock_fsm4["Byte_2"])
-      good_byte2 = self.fsm4_good_byte2 if self.op_owns_acc else None
-      sends.append(volvocan.create_fsm4(self.packer_pt, stock_fsm4, self.accel, fsm4_mode, good_byte2, cam_weight=self.cam_weight))
+      sends.append(volvocan.create_fsm4(self.packer_pt, stock_fsm4, self.accel, fsm4_mode, cam_weight=self.cam_weight))
     return sends
 
   # ---- Longitudinal ----
 
-  def longitudinal(self, CC, CS, good_fsm3):
+  def longitudinal(self, CC, CS):
     """Accel and mode decision, FSM1/FSM3 sent at 50 Hz."""
     if CS.stock_FSM4_frames:
       self.cam_brake = bool(int(CS.stock_FSM4_frames[-1]["Byte_5"]) & 0x40)
@@ -254,7 +229,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     return [
       volvocan.create_radar(self.packer_pt, CS.stock_FSM1),
-      volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check, long_mode, good_fsm3),
+      volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check, self.fsm3_mode(CS, long_mode)),
     ]
 
   def long_decision(self, CC, CS):
@@ -270,32 +245,45 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     w = 0. if op_brakes_more else self.cam_stop_w
     self.cam_relay = w >= 1.
     self.cam_weight = w
+    self.update_cam_brake_honor(cam_accel, w > 0.)
 
     if self.cam_relay:
       # camera owns the stop: FSM3/FSM4 relayed untouched
-      cam_mode = int(CS.stock_FSM3["Byte_2"]) & 0x3
-      self.long_mode = LongMode(cam_mode) if cam_mode <= LongMode.DRIVE else LongMode.COAST
-      self.cam_brake_honor = self.cam_brake
+      self.long_mode = LongMode(CS.cam_fsm3_mode) if CS.cam_fsm3_mode <= LongMode.DRIVE else LongMode.COAST
       return cam_accel, None
 
+    if self.cam_brake_honor:
+      accel = min(accel, cam_accel)
     if w > 0.:
       # blending into the camera's stop
       accel = accel + w * (cam_accel - accel)
-      self.long_mode = LongMode.BRAKE if self.cam_brake else volvocan.next_long_mode(self.long_mode, accel)
-      self.cam_brake_honor = self.cam_brake
-      return accel, self.long_mode
+    self.long_mode = LongMode.BRAKE if self.cam_brake_honor else volvocan.next_long_mode(self.long_mode, accel, self.slope_brake_offset(CC))
+    return accel, self.long_mode
 
+  # ---- Camera rules ----
+
+  def update_cam_brake_honor(self, cam_accel, cam_stopping):
+    """The camera's hydraulic brake is followed during its final stop, and at once below CAMERA_BRAKE_HONOR_BELOW,
+    latched until it releases. Milder ones are ignored (ack spoofed). OP braking more is never limited."""
     if not self.cam_brake:
       self.cam_brake_honor = False
-    elif not self.cam_brake_honor:
-      # latched until the camera releases the brake
-      self.cam_brake_honor = not CCP.OP_IGNORES_MILD_CAMERA_BRAKE or cam_accel < CCP.CAMERA_BRAKE_HONOR_BELOW
-    if self.cam_brake_honor:
-      accel = min(accel, cam_accel)
-      self.long_mode = LongMode.BRAKE
-    else:
-      self.long_mode = volvocan.next_long_mode(self.long_mode, accel)
-    return accel, self.long_mode
+    elif cam_stopping or cam_accel < CCP.CAMERA_BRAKE_HONOR_BELOW:
+      self.cam_brake_honor = True
+
+  @staticmethod
+  def fsm3_mode(CS, long_mode):
+    """Mode written to FSM3: mode 0 whenever the camera is in it, else OP's.
+    FSM3 only: FSM4 and the brake-ack mask stay on OP's mode."""
+    if long_mode is not None and CS.cam_fsm3_mode == LongMode.BRAKE:
+      return LongMode.BRAKE
+    return long_mode
+
+  @staticmethod
+  def slope_brake_offset(CC):
+    """Slope part of the coast accel (m/s^2) from the car's pitch: < 0 uphill, > 0 (capped) downhill."""
+    if len(CC.orientationNED) != 3:
+      return 0.
+    return min(-CCP.COAST_PITCH_GAIN * math.sin(CC.orientationNED[1]), CCP.DOWNHILL_BRAKE_OFFSET_MAX)
 
   def update_cam_stop(self, CC, CS):
     """Camera final stop behind a lead: state and blend weight, at 50 Hz."""
