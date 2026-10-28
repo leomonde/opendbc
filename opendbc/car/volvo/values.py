@@ -73,7 +73,7 @@ class CarControllerParams:
   CAM_ACK_RELEASE_VALUE = 13280  # spoofed BrakeReqAck released at this FSM4 target
 
   # FSM3 mirrors camera mode 0; camera hydraulic brake followed below this
-  CAMERA_BRAKE_HONOR_BELOW = -3.0  # m/s^2
+  CAMERA_BRAKE_HONOR_BELOW = -3.5  # m/s^2
   # With a close camera target, OP accel capped at the camera's, not below the floor
   CAMERA_ACCEL_CAP_FLOOR = 0.0  # m/s^2
   CAMERA_ACCEL_CAP_GAP = 1.5  # s, camera target closer than this
