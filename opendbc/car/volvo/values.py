@@ -10,11 +10,11 @@ from opendbc.car.structs import CarParams
 
 Ecu = CarParams.Ecu
 
-# Volvo EUCD/C1MCA CAN buses: pt (BCM/FSM/PSCM/SAS), chassis (DIM/PAM via CEM), ext (SODL/SODR via CEM)
+# EUCD buses: pt, body (radar), cam
 
 
 class SteerDirection(IntEnum):
-  """LKASteerDirection: EUCD needs 8-frame wait on direction change; C1MCA can use BOTH."""
+  """LKASteerDirection."""
   NONE = 0
   RIGHT = 1
   LEFT = 2
@@ -22,14 +22,14 @@ class SteerDirection(IntEnum):
 
 
 class LongMode(IntEnum):
-  """FSM3 Byte_2 bits 1:0. The ECM uses the hydraulic brake only in BRAKE."""
+  """FSM3 ACC_Mode."""
   BRAKE = 0
   COAST = 1
   DRIVE = 2
 
 
 class EcmAccState(IntEnum):
-  """EngineData Byte_4 bits 5:4, the ECM's ACC state."""
+  """EngineData ACC_State_ECM."""
   OFF = 1
   STANDBY = 2
   ENGAGED = 3
@@ -45,61 +45,74 @@ class CarControllerParams:
   BLOCK_LEN = 8   # frames to block steering on a direction change
   DEADZONE = 0.2  # deg, keep the previous direction inside it
   BUTTON_BURST = 15  # frames per button press
-  SNG_OP_RESUME_TIME = 0.5  # s of openpilot's resume request before it triggers the SNG resume
+  SNG_OP_RESUME_TIME = 0.5  # s of OP resume before SNG
 
   # Longitudinal limits
   ACCEL_MIN = -4.0  # m/s^2
   ACCEL_MAX = 2.0   # m/s^2
 
-  # FSM3 mode hysteresis on OP accel (fit to the stock camera)
+  # FSM3 mode hysteresis on OP accel
   BRAKE_ENTER = -0.50  # m/s^2
   BRAKE_EXIT = -0.15
   DRIVE_ENTER = 0.08
   DRIVE_EXIT = 0.04
 
-  # FSM4 14-bit brake target vs accel (stock camera means), with and without the brake flag
+  # FSM3 ACC_TractionRequest = gain * accel + offset, as the camera sends it
+  TRACTION_COAST = (94., -9.)
+  TRACTION_DRIVE = (97., -6.)
+
+  # FSM4 14-bit brake target vs accel, with and without brake flag
   FSM4_BRAKE_ACCEL_BP = [-3.5, -2.5, -1.75, -1.25, -0.8, -0.45, -0.2, 0.0, 0.2]
   FSM4_BRAKE_VALUE_V = [12519, 12850, 12964, 13073, 13143, 13227, 13279, 13328, 13378]
   FSM4_NO_BRAKE_ACCEL_BP = [-0.45, -0.2, 0.0, 0.2, 0.45, 0.8, 1.5]
   FSM4_NO_BRAKE_VALUE_V = [13276, 13299, 13318, 13338, 13333, 13377, 13449]
 
-  # Brake acks to the camera (0x220 Byte_2 bit2, 0x299 Byte_5 bit3): masked while OP brakes alone, and this long after
-  CAM_BRAKE_MASK_MSGS = frozenset({0x220, 0x299})
+  # Brake acks to the camera, masked while OP brakes alone
+  CAM_BRAKE_MASK_MSGS = frozenset({"wheelspeed1", "BrakeReqAck"})
   CAM_BRAKE_MASK_HOLD_FRAMES = int(1.0 / DT_CTRL)
-  CAM_ACK_RELEASE_VALUE = 13280  # spoofed 0x299 ack drops when the camera's FSM4 target reaches this (no braking)
+  CAM_ACK_RELEASE_VALUE = 13280  # spoofed BrakeReqAck released at this FSM4 target
 
-  # Camera brake requests: OP ignores mild ones (spoofed ack), follows them at once below this, latched while it brakes
-  CAMERA_BRAKE_HONOR_BELOW = -2.0  # m/s^2
+  # FSM3 mirrors camera mode 0; camera hydraulic brake followed below this
+  CAMERA_BRAKE_HONOR_BELOW = -3.0  # m/s^2
+  # With a close camera target, OP accel capped at the camera's, not below the floor
+  CAMERA_ACCEL_CAP_FLOOR = 0.0  # m/s^2
+  CAMERA_ACCEL_CAP_GAP = 1.5  # s, camera target closer than this
+  CAMERA_ACCEL_CAP_MIN_DIST = 10.  # m, at low speed
 
-  # The camera aborts (0x10) after ~3-6 s of its FSM3 mode 0 while the car gets another mode (routes 821-854),
-  # so FSM3 shows mode 0 whenever the camera does (mode bits only: FSM4 decides the hydraulic brake).
-
-  # BRAKE mode thresholds follow what coasting gives on the slope: lower uphill (route 858 braked on a 5° slope),
-  # higher downhill (route 85a coasted 3-7 km/h over the limit on a 1.5° descent)
-  COAST_PITCH_GAIN = 5.65  # m/s^2 per sin(pitch), openpilot's coast fit
-  DOWNHILL_BRAKE_OFFSET_MAX = 0.15  # m/s^2, keeps BRAKE exit (-0.15 + this) at or below 0
-  # Uphill, BRAKE is entered this much further below coast: OP's request overshoots the coast cap a little
-  # (route 85b, 5° climb: -1.1 vs -0.8 coast, hydraulic brake jerks)
+  # BRAKE thresholds shifted by the slope's coast accel
+  COAST_PITCH_GAIN = 5.65  # m/s^2 per sin(pitch)
+  DOWNHILL_BRAKE_OFFSET_MAX = 0.15  # m/s^2, downhill shift cap
+  # Extra uphill margin before BRAKE
   UPHILL_BRAKE_ENTER_EXTRA = 0.6  # fraction of the uphill offset
+  # Downhill coast tolerance over the ACC set speed
+  COAST_TOLERANCE = 5. * CV.KPH_TO_MS  # brakes from set + this, releases at set
+  COAST_TOLERANCE_MAX_DECEL = -1.5  # m/s^2, stronger requests brake
+  COAST_TOLERANCE_LEAD_GAP = 2.5  # s, no tolerance with a closer camera target
+  COAST_TOLERANCE_AT_SET = 1. * CV.KPH_TO_MS  # below the set, still counted as at set
+
+  # Accel request ramps (jerk limits)
+  JERK_UP = 2.0  # m/s^3, rising
+  JERK_DOWN_LIFT = 2.5  # m/s^3, falling while positive
+  JERK_DOWN_BRAKE = 4.0  # m/s^3, falling at or below 0
 
   # Camera final stop behind a lead
   CAMERA_STOPS_BEHIND_LEAD = True
-  CAM_STOP_HANDOVER_SPEED = 10. * CV.KPH_TO_MS  # camera takes over below this, with a target
-  CAM_STOP_RETURN_SPEED = 15. * CV.KPH_TO_MS    # OP takes back above this
-  CAM_STOP_TRANSITION_TIME = 1.0  # s, blend between OP and camera
-  OP_BRAKE_OVERRIDE_ACCEL = -0.3  # m/s^2, OP brakes if it wants less than this and the camera does not brake
-  OP_BRAKE_OVERRIDE_MARGIN = 1.0  # m/s^2, OP brakes if it wants this much more than the camera
+  CAM_STOP_HANDOVER_SPEED = 20. * CV.KPH_TO_MS  # camera stops below this, with a target
+  CAM_STOP_RETURN_SPEED = 30. * CV.KPH_TO_MS  # OP takes back above this
+  CAM_STOP_TRANSITION_TIME = 1.0  # s, OP/camera blend
+  OP_BRAKE_OVERRIDE_ACCEL = -0.3  # m/s^2, OP brakes below this if the camera doesn't
+  OP_BRAKE_OVERRIDE_MARGIN = 1.0  # m/s^2, OP brakes if this far below the camera
 
   def __init__(self, CP):
     pass
 
 class CANBUS:
   pt = 0
-  body = 1  # aux bus — carries Delphi ESR 2.5 radar (0x500..0x53F) and CEM dynamics
+  body = 1  # radar bus
   cam = 2
 
 
-# Delphi ESR 2.5 on aux bus (0x500–0x53F, 20Hz, 64 tracks); read directly so planner sees leads independently of stock FSM
+# Delphi ESR 2.5 radar
 RADAR_ESR = "ESR"
 
 @dataclass
@@ -120,7 +133,7 @@ class VolvoCarDocs(CarDocs):
 class VolvoCarSpecs(CarSpecs):
   steerRatio: float = 15.0
   centerToFrontRatio: float = 0.44
-  minSteerSpeed: float = 1.0
+  minSteerSpeed: float = 0.1
 
 
 class CAR(Platforms):

@@ -59,7 +59,7 @@ class CarState(CarStateBase):
     # the ECM is the ACC master
     self.ecm_acc_engaged = int(pt_cp.vl["EngineData"]["ACC_State_ECM"]) == EcmAccState.ENGAGED
     ret.cruiseState.enabled = self.ecm_acc_engaged
-    # camera standstill hold (also set in its fault state, so gated by the car's standstill)
+    # Camera standstill hold, gated by the car's standstill
     ret.cruiseState.standstill = bool(cam_cp.vl["FSM3"]["ACC_Standstill"]) and ret.standstill
     ret.cruiseState.nonAdaptive = False
     ret.accFaulted = False
@@ -92,8 +92,7 @@ class CarState(CarStateBase):
     ret.leftBlinker = pt_cp.vl["MiscCarInfo"]["TurnSignal"] == 1
     ret.rightBlinker = pt_cp.vl["MiscCarInfo"]["TurnSignal"] == 3
 
-    # Synthesize one accelCruise/decelCruise per frame from pending delta.
-    # Suppressed after ICBM sends a button to avoid feedback into v_cruise_kph.
+    # Cruise button events from set speed changes, paused after ICBM presses
     cruise_kph_now = round(ret.cruiseState.speed * CV.MS_TO_KPH)
     if self._icbm_suppress_frames > 0:
       self._cruise_speed_prev_kph = cruise_kph_now
@@ -102,8 +101,7 @@ class CarState(CarStateBase):
       self._pending_delta += cruise_kph_now - self._cruise_speed_prev_kph
     self._cruise_speed_prev_kph = cruise_kph_now
 
-    # Emit one event per physical ACC step; trigger on delta >= 1 to handle Volvo's
-    # sub-step snaps (e.g. 41→45 km/h) that would never reach a larger threshold.
+    # One event per ACC step, on delta >= 1
     step = max(1, self._custom_acc_step)
     if self._pending_delta >= 1:
       ret.buttonEvents = [structs.CarState.ButtonEvent(pressed=False, type=ButtonType.accelCruise)]
@@ -119,15 +117,15 @@ class CarState(CarStateBase):
     self.pscm_stock_values = pt_cp.vl["PSCM1"]
     self.stock_FSM1 = copy.copy(cam_cp.vl["FSM1"])
     self.stock_FSM3 = copy.copy(cam_cp.vl["FSM3"])
-    self.cam_fsm3_mode = int(self.stock_FSM3["Byte_2"]) & 0x3  # camera's FSM3 mode (LongMode)
+    self.cam_fsm3_mode = int(self.stock_FSM3["ACC_Mode"])  # camera's FSM3 mode (LongMode)
     self.ACC_Check = cam_cp.vl["FSM3"]["ACC_Check"]
-    # all frames this cycle of the messages carcontroller relays 1:1
+    # All frames this cycle of the relayed messages
     self.stock_FSM0_frames = all_frames(cam_cp, "FSM0")
     self.stock_FSM4_frames = all_frames(cam_cp, "FSM4")
-    self.stock_133_frames = all_frames(pt_cp, "NEW_MSG_133")
-    self.stock_323_frames = all_frames(pt_cp, "NEW_MSG_323")
-    self.stock_220_frames = all_frames(pt_cp, "wheelspeed1")
-    self.stock_299_frames = all_frames(pt_cp, "NEW_MSG_299")
+    self.stock_BrakeLevel_frames = all_frames(pt_cp, "BrakeLevel")
+    self.stock_BrakeStatus_frames = all_frames(pt_cp, "BrakeStatus")
+    self.stock_wheelspeed1_frames = all_frames(pt_cp, "wheelspeed1")
+    self.stock_BrakeReqAck_frames = all_frames(pt_cp, "BrakeReqAck")
 
     # TSR speed limit from camera (0 = no sign)
     tsr_raw = cam_cp.vl["FSM5"]["TSR_Speed"]
@@ -149,10 +147,10 @@ class CarState(CarStateBase):
       ("Doors", 20),
       ("SAS0", 100),
       ("EngineData", 66),
-      ("NEW_MSG_133", 50),
-      ("NEW_MSG_323", 25),
+      ("BrakeLevel", 50),
+      ("BrakeStatus", 25),
       ("wheelspeed1", 50),
-      ("NEW_MSG_299", 50),
+      ("BrakeReqAck", 50),
     ]
 
     cam_messages = [
