@@ -191,6 +191,10 @@ static bool rx_msg_safety_check(const CANPacket_t *msg,
 bool safety_rx_hook(const CANPacket_t *msg) {
   bool controls_allowed_prev = controls_allowed;
 
+  if (current_hooks->rx_all != NULL) {
+    current_hooks->rx_all(msg);
+  }
+
   bool valid = rx_msg_safety_check(msg, &current_safety_config, current_hooks);
   bool whitelisted = get_addr_check_index(msg, current_safety_config.rx_checks, current_safety_config.rx_checks_len) != -1;
   if (valid && whitelisted) {

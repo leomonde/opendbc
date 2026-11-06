@@ -44,11 +44,33 @@ class CarControllerParams:
   STEER_TIMEOUT = 30 / DT_CTRL  # frames of 0 torque before the EPS faults
   BLOCK_LEN = 8   # frames to block steering on a direction change
   DEADZONE = 0.2  # deg, keep the previous direction inside it
-  BUTTON_BURST = 15  # frames per button press
-  SNG_OP_RESUME_TIME = 0.5  # s of OP resume before SNG
+  BUTTON_BURST = 15  # frames per ICBM button press
+  # Resume held this long on copies of the CEM's CCButtons: a one-shot burst was lost amid its frames (route 89e)
+  RESUME_HOLD_FRAMES = int(0.3 / DT_CTRL)
+  # s of planner resume before SNG: 0.2 let a red-light flicker through, the ECM drove off on its own (route 8a4)
+  SNG_OP_RESUME_TIME = 0.5
+  MIN_STEER_SPEED = 0.1  # m/s, no steering nor cancel button below this
+
+  # OP's stop to 0 (route 807): below the enter speed, braking, OP owns the ECM and the camera is shown ACC standby
+  FULL_STOP = True
+  FULL_STOP_ENTER_SPEED = 25. * CV.KPH_TO_MS  # OP takes the ECM below this while braking; 30 handed back and forth with the resync at 32 (route 89b)
+  STOPPING_FLAG_SPEED = 2.6 * CV.KPH_TO_MS  # FSM4 b1 F1 -> F9 below this
+  HOLD_RELEASE_FRAMES = int(0.05 / DT_CTRL)  # brake request released after the car's hold
+  STANDSTILL_DELAY = 3.0  # s stopped before FSM3 ACC_Standstill
+  HOLD_ACCEL = -0.08  # m/s^2, FSM3 accel while the car holds (raw 0x7C)
+  GO_RETRY_TIME = 2.0  # s still stopped after the resume burst -> standstill again, retry
+  ECM_READY_TIMEOUT = 3.0  # s after FSM3 ACC_Standstill: resume sent even without the ECM's ready (seen 1.5 s)
+  # Camera shown ACC standby for the whole stop, re-engaged like on the driver's Set: Set, then EngineData 30 ms later
+  CAM_RESYNC_SPEED = 32. * CV.KPH_TO_MS  # re-engage above this (its ACC minimum is 30)
+  CAM_SET_FRAMES = int(0.16 / DT_CTRL)  # Set press to the camera, as long as the driver's (route 885)
+  CAM_SPOOF_RELEASE_FRAMES = int(0.03 / DT_CTRL)  # EngineData engaged again this long after the Set
+  CAM_RESYNC_RETRY = 2.0  # s without the camera back -> standby again for 1 s, Set again
+  CAM_RESYNC_ATTEMPTS = 3  # then the camera's frames back to the ECM (ACC drops)
+  FULL_STOP_EXIT_STANDBY_MAX = 1.0  # s, stop ended with the ECM still engaged: camera kept in standby at most this long
+  CAM_CLEAN_FRAMES = int(0.3 / DT_CTRL)  # camera engaged and clean this long -> its frames back to the ECM
 
   # Longitudinal limits
-  ACCEL_MIN = -4.0  # m/s^2
+  ACCEL_MIN = -3.5  # m/s^2, as the panda's (the camera's harder brake goes out as its own frame)
   ACCEL_MAX = 2.0   # m/s^2
 
   # FSM3 mode hysteresis on OP accel
@@ -84,24 +106,17 @@ class CarControllerParams:
   DOWNHILL_BRAKE_OFFSET_MAX = 0.15  # m/s^2, downhill shift cap
   # Extra uphill margin before BRAKE
   UPHILL_BRAKE_ENTER_EXTRA = 0.6  # fraction of the uphill offset
-  # Downhill coast tolerance over the ACC set speed
-  COAST_TOLERANCE = 5. * CV.KPH_TO_MS  # brakes from set + this, releases at set
-  COAST_TOLERANCE_MAX_DECEL = -1.5  # m/s^2, stronger requests brake
-  COAST_TOLERANCE_LEAD_GAP = 2.5  # s, no tolerance with a closer camera target
-  COAST_TOLERANCE_AT_SET = 1. * CV.KPH_TO_MS  # below the set, still counted as at set
+  # Downhill: the planner targets set + this, so OP holds it with light braking (routes 89f, 8a1)
+  DOWNHILL_SET_OFFSET = 5. * CV.KPH_TO_MS
+  DOWNHILL_ENTER_PITCH = -2.  # deg, downhill below this for DOWNHILL_ENTER_TIME
+  DOWNHILL_EXIT_PITCH = -1.  # deg, back to the set above this for DOWNHILL_EXIT_TIME
+  DOWNHILL_ENTER_TIME = 2.0  # s
+  DOWNHILL_EXIT_TIME = 1.0  # s
 
   # Accel request ramps (jerk limits)
   JERK_UP = 2.0  # m/s^3, rising
   JERK_DOWN_LIFT = 2.5  # m/s^3, falling while positive
   JERK_DOWN_BRAKE = 4.0  # m/s^3, falling at or below 0
-
-  # Camera final stop behind a lead
-  CAMERA_STOPS_BEHIND_LEAD = True
-  CAM_STOP_HANDOVER_SPEED = 20. * CV.KPH_TO_MS  # camera stops below this, with a target
-  CAM_STOP_RETURN_SPEED = 30. * CV.KPH_TO_MS  # OP takes back above this
-  CAM_STOP_TRANSITION_TIME = 1.0  # s, OP/camera blend
-  OP_BRAKE_OVERRIDE_ACCEL = -0.3  # m/s^2, OP brakes below this if the camera doesn't
-  OP_BRAKE_OVERRIDE_MARGIN = 1.0  # m/s^2, OP brakes if this far below the camera
 
   def __init__(self, CP):
     pass
@@ -133,7 +148,7 @@ class VolvoCarDocs(CarDocs):
 class VolvoCarSpecs(CarSpecs):
   steerRatio: float = 15.0
   centerToFrontRatio: float = 0.44
-  minSteerSpeed: float = 0.1
+  minSteerSpeed: float = 0.  # the port's own limit is MIN_STEER_SPEED
 
 
 class CAR(Platforms):

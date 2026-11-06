@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from opendbc.car import DT_CTRL
 from opendbc.car.volvo.carcontroller import CarController
 from opendbc.car.volvo.values import CarControllerParams, LongMode
 from opendbc.car.volvo import volvocan
@@ -19,68 +20,51 @@ def controller(cam_brake=False):
   return cc
 
 
-def test_hard_camera_brake_followed_and_latched():
+def test_hard_camera_brake_followed_at_once_and_latched():
   cc = controller(cam_brake=True)
-  cc.update_cam_brake_honor(HARD, False)
-  assert cc.cam_brake_honor
-  cc.update_cam_brake_honor(-1.0, False)
-  assert cc.cam_brake_honor  # latched while the camera brakes
+  assert cc.camera_brake(0.1, HARD) == HARD
+  assert cc.camera_brake(0.1, -1.0) == -1.0  # latched while the camera brakes
   cc.cam_brake = False
-  cc.update_cam_brake_honor(-1.0, False)
-  assert not cc.cam_brake_honor
+  assert cc.camera_brake(0.1, -1.0) == 0.1   # released with the camera's brake
 
 
-def test_mild_camera_brake_ignored_except_final_stop():
+def test_mild_camera_brake_ignored():
   cc = controller(cam_brake=True)
-  cc.update_cam_brake_honor(-1.0, False)
+  assert cc.camera_brake(0.1, -1.0) == 0.1
   assert not cc.cam_brake_honor
-  cc.update_cam_brake_honor(-1.0, True)
-  assert cc.cam_brake_honor
 
 
-def cs(mode):
-  return SimpleNamespace(cam_fsm3_mode=mode)
+def test_camera_brake_released_when_only_its_leftover_is_left():
+  cc = controller(cam_brake=True)
+  assert cc.camera_brake(0.1, HARD) == HARD
+  assert cc.camera_brake(1.9, 0.96, leftover=True) == 1.9  # target gone, camera asks no brake (route 8bd)
+  assert not cc.cam_brake_honor
+
+
+def test_op_braking_more_is_never_limited():
+  cc = controller(cam_brake=True)
+  assert cc.camera_brake(HARD - 0.5, HARD) == HARD - 0.5
+
+
+def fsm3(mode, distance=50, cam_accel=-1.0):
+  return SimpleNamespace(stock_FSM3={"ACC_Mode": mode, "ACC_AccelerationRequest": cam_accel}, cam_fsm3_mode=mode, acc_distance=distance)
+
+
+@pytest.mark.parametrize("op_mode", [LongMode.COAST, LongMode.DRIVE])
+def test_fsm3_leaves_the_camera_brake_leftover(op_mode):
+  assert CarController.fsm3_mode(fsm3(LongMode.BRAKE, distance=255, cam_accel=0.96), op_mode) == op_mode
+  assert CarController.fsm3_mode(fsm3(LongMode.BRAKE, distance=255, cam_accel=-0.5), op_mode) == LongMode.BRAKE
 
 
 @pytest.mark.parametrize("op_mode", [LongMode.BRAKE, LongMode.COAST, LongMode.DRIVE])
 def test_fsm3_mirrors_camera_mode_0(op_mode):
-  assert CarController.fsm3_mode(cs(LongMode.BRAKE), op_mode) == LongMode.BRAKE
+  assert CarController.fsm3_mode(fsm3(LongMode.BRAKE), op_mode) == LongMode.BRAKE
 
 
 @pytest.mark.parametrize("cam_mode", [LongMode.COAST, LongMode.DRIVE])
 @pytest.mark.parametrize("op_mode", [LongMode.BRAKE, LongMode.COAST, LongMode.DRIVE])
 def test_fsm3_keeps_op_mode_otherwise(cam_mode, op_mode):
-  assert CarController.fsm3_mode(cs(cam_mode), op_mode) == op_mode
-
-
-def test_fsm3_untouched_without_op_mode():
-  assert CarController.fsm3_mode(cs(LongMode.BRAKE), None) is None
-
-
-def offset(pitch_deg):
-  return CarController.slope_brake_offset(SimpleNamespace(orientationNED=[0., math.radians(pitch_deg), 0.]))
-
-
-def test_uphill_coast_is_not_braking():
-  # route 858: -0.84 on a 5.4 deg slope is just coasting; route 85b: the coast cap overshot to -1.15
-  assert next_long_mode(LongMode.COAST, -0.84) == LongMode.BRAKE
-  assert next_long_mode(LongMode.COAST, -0.84, offset(5.4)) == LongMode.COAST
-  assert next_long_mode(LongMode.COAST, -1.15, offset(5.0)) == LongMode.COAST
-  assert next_long_mode(LongMode.COAST, -1.6, offset(5.0)) == LongMode.BRAKE
-  assert next_long_mode(LongMode.BRAKE, -0.8, offset(5.0)) == LongMode.BRAKE  # holds down to the usual exit
-
-
-def test_downhill_brakes_earlier():
-  # route 85a: on a 1.5 deg descent a -0.4 request coasted and the car sped up
-  assert next_long_mode(LongMode.COAST, -0.4) == LongMode.COAST
-  assert next_long_mode(LongMode.COAST, -0.4, offset(-1.5)) == LongMode.BRAKE
-  assert offset(-10.) == CCP.DOWNHILL_BRAKE_OFFSET_MAX
-  assert next_long_mode(LongMode.BRAKE, 0.01, offset(-10.)) == LongMode.COAST
-
-
-def test_flat_unchanged():
-  assert offset(0.) == 0.
-  assert CarController.slope_brake_offset(SimpleNamespace(orientationNED=[])) == 0.
+  assert CarController.fsm3_mode(fsm3(cam_mode), op_mode) == op_mode
 
 
 def test_traction_continuous_at_drive_switch():
@@ -91,33 +75,78 @@ def test_traction_continuous_at_drive_switch():
   assert drive - coast <= 6
 
 
-KPH = 1 / 3.6
+def test_fsm3_untouched_without_op_mode():
+  assert CarController.fsm3_mode(fsm3(LongMode.BRAKE), None) is None
 
 
-def tolerance(v_kph, set_kph=110., accel=-0.5, pitch_deg=-2., lead_m=255, braking=False):
-  CC = SimpleNamespace(hudControl=SimpleNamespace(setSpeed=set_kph * KPH),
-                       orientationNED=[0., math.radians(pitch_deg), 0.])
-  CS = SimpleNamespace(out=SimpleNamespace(vEgo=v_kph * KPH), acc_distance=lead_m)
-  return CarController.coast_tolerance(CC, CS, accel, CarController.slope_brake_offset(CC), braking)
+def offset(pitch_deg):
+  return CarController.slope_brake_offset(SimpleNamespace(orientationNED=[0., math.radians(pitch_deg), 0.]))
 
 
-def test_coast_tolerance_downhill_over_set():
-  assert tolerance(110.5)
-  assert tolerance(114.)
-  assert not tolerance(115.5)          # above set + 5: brakes
-  assert not tolerance(90.)            # held below the set: no tolerance
-  assert not tolerance(112., pitch_deg=0.)  # flat
-  assert tolerance(112., accel=-1.2)   # overspeed request still coasts
-  assert not tolerance(112., accel=-1.6)  # strong request
-  assert not tolerance(112., lead_m=40)   # camera target closer than 2.5 s
-  assert tolerance(112., lead_m=120)
+def test_uphill_coast_is_not_braking():
+  # Coast on a 5.4 deg climb is not braking
+  assert next_long_mode(LongMode.COAST, -0.84) == LongMode.BRAKE
+  assert next_long_mode(LongMode.COAST, -0.84, offset(5.4)) == LongMode.COAST
+  assert next_long_mode(LongMode.COAST, -1.5, offset(5.4)) == LongMode.BRAKE
 
 
-def test_coast_tolerance_brakes_back_to_set():
-  assert not tolerance(113., braking=True)
-  assert not tolerance(110.5, braking=True)
-  assert tolerance(109.8, braking=True)
-  assert not tolerance(108., braking=True)  # well below the set: normal logic
+def test_uphill_coast_overshoot_is_not_braking():
+  # Coast-cap overshoot on a 5 deg climb
+  assert next_long_mode(LongMode.COAST, -1.15, offset(5.0)) == LongMode.COAST
+  assert next_long_mode(LongMode.COAST, -1.6, offset(5.0)) == LongMode.BRAKE
+  # Holds down to the usual exit
+  assert next_long_mode(LongMode.BRAKE, -0.8, offset(5.0)) == LongMode.BRAKE
+
+
+def test_downhill_brakes_earlier():
+  # Downhill brakes earlier
+  assert next_long_mode(LongMode.COAST, -0.4) == LongMode.COAST
+  assert next_long_mode(LongMode.COAST, -0.4, offset(-1.5)) == LongMode.BRAKE
+  assert offset(-10.) == CCP.DOWNHILL_BRAKE_OFFSET_MAX
+  # BRAKE exit stays at or below 0
+  assert next_long_mode(LongMode.BRAKE, 0.01, offset(-10.)) == LongMode.COAST
+
+
+def test_flat_unchanged():
+  assert offset(0.) == 0.
+  assert CarController.slope_brake_offset(SimpleNamespace(orientationNED=[])) == 0.
+
+
+def downhill_after(pitches_deg, start=False):
+  """Feeds one pitch per frame, returns the downhill state after each."""
+  cc = CarController.__new__(CarController)
+  cc.downhill, cc.downhill_frames = start, 0
+  CS = SimpleNamespace()
+  out = []
+  for p in pitches_deg:
+    cc.update_downhill(SimpleNamespace(orientationNED=[0., math.radians(p), 0.]), CS)
+    out.append(CS.downhill)
+  return out
+
+
+def test_downhill_needs_2s_below_minus_2_deg():
+  n = int(2.0 / DT_CTRL)
+  assert not any(downhill_after([-3.] * (n - 1)))
+  assert downhill_after([-3.] * n)[-1]
+  # a short dip (hard braking) does not count
+  assert not any(downhill_after(([-3.] * (n // 2) + [0.]) * 3))
+  assert not any(downhill_after([-1.5] * (3 * n)))  # between the thresholds
+
+
+def test_downhill_ends_after_1s_above_minus_1_deg():
+  n = int(1.0 / DT_CTRL)
+  assert all(downhill_after([-1.5] * (5 * n), start=True))  # still downhill between the thresholds
+  states = downhill_after([0.] * n, start=True)
+  assert all(states[:-1]) and not states[-1]
+
+
+def test_no_pitch_is_flat():
+  cc = CarController.__new__(CarController)
+  cc.downhill, cc.downhill_frames = False, 0
+  CS = SimpleNamespace()
+  for _ in range(500):
+    cc.update_downhill(SimpleNamespace(orientationNED=[]), CS)
+  assert not CS.downhill
 
 
 def limited(accel, last):
@@ -128,10 +157,10 @@ def limited(accel, last):
 
 def test_jerk_limit_ramps():
   dt = 0.02
-  assert abs(limited(1.3, 0.0) - CCP.JERK_UP * dt) < 1e-9
-  assert abs(limited(-0.4, 1.3) - (1.3 - CCP.JERK_DOWN_LIFT * dt)) < 1e-9
-  assert abs(limited(-3.5, -1.0) - (-1.0 - CCP.JERK_DOWN_BRAKE * dt)) < 1e-9
-  assert limited(0.31, 0.3) == 0.31
+  assert abs(limited(1.3, 0.0) - CCP.JERK_UP * dt) < 1e-9             # rising
+  assert abs(limited(-0.4, 1.3) - (1.3 - CCP.JERK_DOWN_LIFT * dt)) < 1e-9  # lifting off
+  assert abs(limited(-3.5, -1.0) - (-1.0 - CCP.JERK_DOWN_BRAKE * dt)) < 1e-9  # braking deeper
+  assert limited(0.31, 0.3) == 0.31                                        # small steps pass
 
 
 def test_jerk_limit_reaches_target():
@@ -158,5 +187,109 @@ def test_accel_cap_never_adds_braking():
 
 def test_accel_cap_off_without_close_target():
   assert CarController.camera_accel_cap(cam_target(255), 2.0, -0.5) == 2.0
+  # Same far lead for OP and camera: OP keeps its accel
   assert CarController.camera_accel_cap(cam_target(70), 2.0, 1.0) == 2.0
   assert CarController.camera_accel_cap(cam_target(9, v=0.), 1.0, 0.2) == 0.2
+
+
+def test_fsm3_template_never_keeps_the_camera_ack():
+  """The camera's ACC_Check (engaging at standstill) left in the template made the ECM brake in the drive-off (8a3)."""
+  from opendbc.car.volvo.full_stop import FullStop
+  fs = FullStop()
+  cam_fsm3 = {"ACC_NoTargetCancel": 0, "Byte_6": 0, "FrameKind": 0x81, "ACC_Check": 1}
+  CS = SimpleNamespace(ecm_acc_engaged=True, stock_FSM3=cam_fsm3,
+                       stock_FSM0_frames=[{"Byte_0": 0, "ACC_AbortCode": 0, "ACC_Enabled": 1}],
+                       stock_FSM4_frames=[{"Byte_2": 0}], out=SimpleNamespace(vEgo=0.))
+  fs.update(SimpleNamespace(longActive=False), CS)
+  assert fs.tpl_fsm3["data"]["ACC_Check"] == 0
+  assert cam_fsm3["ACC_Check"] == 1  # the camera's frame untouched
+
+
+def stopped_full_stop(seconds=3.):
+  """OP's stop at standstill, the car holding."""
+  from opendbc.car.volvo.full_stop import FullStop
+  fs = FullStop()
+  fs.active = fs.cam_standby = True
+  fs.tpl_fsm4 = {"Byte_0": 0x55, "ACC_BrakeRequest": 1}
+  CS = SimpleNamespace(ecm_acc_engaged=True, car_hold=True, ecm_standstill_ready=False,
+                       stock_FSM3={"ACC_NoTargetCancel": 0, "Byte_6": 0, "FrameKind": 0x81, "ACC_Check": 0},
+                       stock_FSM0_frames=[{"Byte_0": 0, "ACC_AbortCode": 0, "ACC_Enabled": 0}],
+                       stock_FSM4_frames=[{"Byte_2": 0}],
+                       out=SimpleNamespace(vEgo=0., standstill=True, gasPressed=False))
+  CC = SimpleNamespace(enabled=True, longActive=True, actuators=SimpleNamespace(accel=-1.))
+  for _ in range(int(seconds / DT_CTRL)):
+    fs.update(CC, CS)
+  assert fs.holding and fs.standstill == (seconds >= CCP.STANDSTILL_DELAY)
+  return fs, CC, CS
+
+
+def test_driver_gas_in_the_stop_drives_off_engaged():
+  fs, CC, CS = stopped_full_stop()
+  CS.out.gasPressed, CC.longActive = True, False
+  fs.update(CC, CS)
+  assert fs.active and fs.driver_gas and fs.driving_off
+  assert not fs.standstill and not fs.holding
+  fsm4, op_mode = fs.fsm4({"Byte_0": 0xAA})
+  assert fsm4["ACC_BrakeRequest"] == 0 and not op_mode  # no brake from OP on the gas
+
+
+def test_disengaged_on_the_gas_ends_the_stop():
+  fs, CC, CS = stopped_full_stop()
+  CS.out.gasPressed, CC.longActive, CC.enabled = True, False, False
+  fs.update(CC, CS)
+  assert not fs.active and not fs.driver_gas
+
+
+def test_gas_release_keeps_the_stop_until_op_long_is_back():
+  fs, CC, CS = stopped_full_stop()
+  CS.out.gasPressed, CC.longActive = True, False
+  fs.update(CC, CS)
+  CS.out.gasPressed = False  # pedal released, OP's long back a frame later
+  fs.update(CC, CS)
+  assert fs.active and fs.driver_gas
+  CC.longActive = True
+  fs.update(CC, CS)
+  assert fs.active and not fs.driver_gas
+
+
+def test_short_stop_drives_off_on_traction():
+  fs, CC, CS = stopped_full_stop(seconds=1.)
+  CC.actuators.accel = 0.5
+  fs.update(CC, CS)
+  assert fs.active and not fs.stopping and not fs.holding and not fs.standstill
+
+
+def test_long_stop_waits_for_the_resume():
+  fs, CC, CS = stopped_full_stop()
+  CC.actuators.accel = 0.5
+  fs.update(CC, CS)
+  assert fs.stopping and fs.holding and fs.standstill
+
+
+def test_ecm_in_standstill_waits_for_the_resume():
+  fs, CC, CS = stopped_full_stop(seconds=1.)
+  CS.ecm_standstill_ready, CC.actuators.accel = True, 0.5
+  fs.update(CC, CS)
+  assert fs.stopping and fs.holding
+
+
+def resume_buttons_after(driver_resume, active):
+  """One frame stopped in standstill: the Resume hold frames left and the drive-off request."""
+  from opendbc.car.volvo.full_stop import FullStop
+  cc = CarController.__new__(CarController)
+  cc.frame, cc.last_resume_frame = 1000, 0
+  cc.op_resume_frames = cc.resume_hold_frames = cc.sng_ack_frames = cc.sng_count = 0
+  cc.waiting, cc.distance, cc.last_ccbuttons = False, 0, None
+  cc.full_stop = FullStop()
+  cc.full_stop.active = active
+  CS = SimpleNamespace(out=SimpleNamespace(cruiseState=SimpleNamespace(enabled=True, standstill=True), vEgo=0.),
+                       acc_distance=0, stock_CCButtons_frames=[], driver_resume=driver_resume,
+                       ecm_standstill_ready=True)
+  cc.resume_buttons(SimpleNamespace(cruiseControl=SimpleNamespace(resume=False)), CS, [])
+  return cc.resume_hold_frames, cc.full_stop.drive_off_request
+
+
+def test_driver_resume_drives_off_ops_stop():
+  assert resume_buttons_after(True, True) == (CCP.RESUME_HOLD_FRAMES - 1, True)
+  assert resume_buttons_after(False, True) == (0, False)
+  assert resume_buttons_after(True, False) == (0, False)  # the camera's own stop takes it by itself

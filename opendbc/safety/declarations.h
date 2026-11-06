@@ -218,6 +218,7 @@ typedef bool (*fwd_hook)(int bus_num, int addr);      // returns true if the mes
 typedef struct {
   safety_hook_init init;
   rx_hook rx;
+  rx_hook rx_all;  // every received frame, before the rx checks (optional)
   tx_hook tx;
   fwd_hook fwd;
   get_checksum_t get_checksum;

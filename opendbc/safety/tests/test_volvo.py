@@ -8,18 +8,19 @@ from opendbc.safety.tests.libsafety import libsafety_py
 import opendbc.safety.tests.common as common
 from opendbc.safety.tests.common import CANPackerSafety
 
+VOLVO_MAIN_BUS = 0
+VOLVO_CAM_BUS = 2
+
 
 class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
-
-  TX_MSGS = [[0x051, 0], [0x127, 0], [0x260, 0], [0x262, 0], [0x270, 0], [0x31A, 0], [0x246, 2], [0x133, 2], [0x323, 2], [0x220, 2], [0x299, 2]]
+  TX_MSGS = [[0x051, VOLVO_MAIN_BUS], [0x127, VOLVO_MAIN_BUS], [0x260, VOLVO_MAIN_BUS], [0x262, VOLVO_MAIN_BUS],
+             [0x270, VOLVO_MAIN_BUS], [0x31A, VOLVO_MAIN_BUS], [0x246, VOLVO_CAM_BUS], [0x133, VOLVO_CAM_BUS],
+             [0x323, VOLVO_CAM_BUS], [0x220, VOLVO_CAM_BUS], [0x299, VOLVO_CAM_BUS], [0x1FF, VOLVO_CAM_BUS],
+             [0x127, VOLVO_CAM_BUS], [0x325, VOLVO_CAM_BUS], [0x12A, VOLVO_CAM_BUS]]
   GAS_PRESSED_THRESHOLD = 10
   STANDSTILL_THRESHOLD = 0.1
-  RELAY_MALFUNCTION_ADDRS = {0: [0x051, 0x262, 0x31A], 2: [0x246, 0x133, 0x323, 0x220, 0x299]}
-  FWD_BLACKLISTED_ADDRS = {2: [0x051, 0x262, 0x31A], 0: [0x051, 0x246, 0x133, 0x323, 0x220, 0x299]}
-
-  VOLVO_MAIN_BUS = 0
-  #VOLVO_AUX_BUS = 1
-  VOLVO_CAM_BUS = 2
+  RELAY_MALFUNCTION_ADDRS = {VOLVO_MAIN_BUS: [0x051, 0x262, 0x31A], VOLVO_CAM_BUS: [0x246, 0x133, 0x323, 0x220, 0x299, 0x1FF, 0x325, 0x12A, 0x127]}
+  FWD_BLACKLISTED_ADDRS = {VOLVO_CAM_BUS: [0x051, 0x262, 0x31A], VOLVO_MAIN_BUS: [0x051, 0x246, 0x133, 0x323, 0x220, 0x299, 0x1FF, 0x325, 0x12A, 0x127]}
 
   # Angle control limits
   STEER_ANGLE_MAX = 90  # deg, matches CarControllerParams.ANGLE_LIMITS
@@ -34,6 +35,9 @@ class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     self.safety = libsafety_py.libsafety
     self.safety.set_safety_hooks(CarParams.SafetyModel.volvo, 0)
     self.safety.init_tests()
+    # LKA_State known from the first CCButtons frame, as on the car
+    self.lka_state = 0
+    self._rx(self._ccbuttons_msg())
 
   def _angle_cmd_msg(self, angle: float, enabled: bool):
     # LKAAngleReq carries the signed angle the safety rate-limits. LKASteerDirection is the
@@ -41,20 +45,33 @@ class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     # decide engagement — it drops to NONE during the anti-windup pause while OP stays engaged.
     direction = (2 if angle > 0 else 1) if enabled else 0
     values = {"LKAAngleReq": angle, "LKASteerDirection": direction}
-    return self.packer.make_can_msg_safety("FSM2", self.VOLVO_MAIN_BUS, values)
+    return self.packer.make_can_msg_safety("FSM2", VOLVO_MAIN_BUS, values)
 
   def _angle_meas_msg(self, angle: float):
     values = {"SteeringAngleServo": angle}
-    return self.packer.make_can_msg_safety("PSCM1", self.VOLVO_MAIN_BUS, values)
+    return self.packer.make_can_msg_safety("PSCM1", VOLVO_MAIN_BUS, values)
 
   def _pcm_status_msg(self, enable):
     # engagement comes from the ECM (EngineData), not from the camera's FSM0
     values = {"ACC_State_ECM": 3 if enable else 2}  # engaged / standby
-    return self.packer.make_can_msg_safety("EngineData", self.VOLVO_MAIN_BUS, values)
+    return self.packer.make_can_msg_safety("EngineData", VOLVO_MAIN_BUS, values)
+
+  def _ccbuttons_msg(self):
+    return self.packer.make_can_msg_safety("CCButtons", VOLVO_MAIN_BUS, {"LKA_State": self.lka_state, "ACCOnOffBtnInv": 1, "ACCResumeBtnInv": 1})
+
+  def _lkas_button_msg(self, enabled):
+    # The LKA button has no own bit: a press is a CCButtons frame with LKA_State flipped
+    if enabled:
+      self.lka_state ^= 1
+    return self._ccbuttons_msg()
+
+  def _acc_state_msg(self, enabled):
+    # MADS main on from the camera's ACC_Available
+    return self.packer.make_can_msg_safety("FSM0", VOLVO_CAM_BUS, {"ACC_Available": int(enabled)})
 
   def _fsm0_msg(self, acc_enabled: bool):
     values = {"ACC_Enabled": 1 if acc_enabled else 0, "ACC_Available": 1}
-    return self.packer.make_can_msg_safety("FSM0", self.VOLVO_MAIN_BUS, values)
+    return self.packer.make_can_msg_safety("FSM0", VOLVO_MAIN_BUS, values)
 
   def test_fsm0_acc_enabled_only_with_ecm_engaged(self):
     # OP relays FSM0 to the car; it must never report ACC enabled while the ECM is not engaged
@@ -69,34 +86,50 @@ class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     for state, engaged in ((1, False), (2, False), (3, True)):
       self.safety.set_controls_allowed(False)
       self._rx(self._pcm_status_msg(False))
-      self._rx(self.packer.make_can_msg_safety("EngineData", self.VOLVO_MAIN_BUS, {"ACC_State_ECM": state}))
+      self._rx(self.packer.make_can_msg_safety("EngineData", VOLVO_MAIN_BUS, {"ACC_State_ECM": state}))
       self.assertEqual(engaged, self.safety.get_controls_allowed(), f"{state=}")
+
+  def test_button_rules_only_to_the_car(self):
+    # Resume/cancel to the car need controls allowed / cruise engaged; the camera bus gets every CEM frame, not checked
+    resume = {"ACCResumeBtn": 1, "ACCResumeBtnInv": 0, "ACCOnOffBtnInv": 1}
+    cancel = {"ACCOnOffBtn": 1, "ACCOnOffBtnInv": 0, "ACCResumeBtnInv": 1}
+    self._rx(self._pcm_status_msg(False))
+    for bus in (VOLVO_MAIN_BUS, VOLVO_CAM_BUS):
+      for controls_allowed in (False, True):
+        self.safety.set_controls_allowed(controls_allowed)
+        msg = self.packer.make_can_msg_safety("CCButtons", bus, resume)
+        self.assertEqual(controls_allowed or bus == VOLVO_CAM_BUS, self._tx(msg), f"{bus=} {controls_allowed=}")
+      msg = self.packer.make_can_msg_safety("CCButtons", bus, cancel)
+      self.assertEqual(bus == VOLVO_CAM_BUS, self._tx(msg), f"{bus=}")
 
   def test_camera_fsm0_does_not_engage(self):
     # the camera's FSM0 is not an engagement source anymore
     self.safety.set_controls_allowed(False)
-    self._rx(self.packer.make_can_msg_safety("FSM0", self.VOLVO_CAM_BUS, {"ACC_Enabled": 1}))
+    self._rx(self.packer.make_can_msg_safety("FSM0", VOLVO_CAM_BUS, {"ACC_Enabled": 1}))
     self.assertFalse(self.safety.get_controls_allowed())
 
   def _speed_msg(self, speed: float):
     values = {"VehicleSpeed": speed * 3.6}
-    return self.packer.make_can_msg_safety("VehicleSpeed1", self.VOLVO_MAIN_BUS, values)
+    return self.packer.make_can_msg_safety("VehicleSpeed1", VOLVO_MAIN_BUS, values)
 
   def _user_brake_msg(self, brake):
     values = {"BrakePedal": 2 if brake else 0}
-    return self.packer.make_can_msg_safety("Brake_Info", self.VOLVO_MAIN_BUS, values)
+    return self.packer.make_can_msg_safety("Brake_Info", VOLVO_MAIN_BUS, values)
 
   def _user_gas_msg(self, gas):
     values = {"AccPedal": 10 if gas else 0}
-    return self.packer.make_can_msg_safety("AccPedal", self.VOLVO_MAIN_BUS, values)
+    return self.packer.make_can_msg_safety("AccPedal", VOLVO_MAIN_BUS, values)
+
+  def _speed_msg_2(self, speed):
+    return None
 
   def _vehicle_moving_msg(self, speed: float):
     values = {"VehicleSpeed": 0 if speed <= self.STANDSTILL_THRESHOLD else 10}
-    return self.packer.make_can_msg_safety("VehicleSpeed1", 0, values)
+    return self.packer.make_can_msg_safety("VehicleSpeed1", VOLVO_MAIN_BUS, values)
 
   def _longitudinal_cmd_msg(self, accel: float):
     values = {"ACC_AccelerationRequest": accel, "ACC_Check": 0}
-    return self.packer.make_can_msg_safety("FSM3", self.VOLVO_MAIN_BUS, values)
+    return self.packer.make_can_msg_safety("FSM3", VOLVO_MAIN_BUS, values)
 
   def test_longitudinal_relay_when_controls_not_allowed(self):
     # OP relays FSM3 at 50Hz even when controls are not allowed (to keep the ECU alive).
@@ -111,22 +144,115 @@ class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
     self.safety.set_controls_allowed(True)
     self.assertTrue(self._tx(self._longitudinal_cmd_msg(0.0)))   # neutral — must pass
     self.assertTrue(self._tx(self._longitudinal_cmd_msg(2.0)))   # max accel — must pass
-    self.assertTrue(self._tx(self._longitudinal_cmd_msg(-4.0)))  # max decel — must pass
+    self.assertTrue(self._tx(self._longitudinal_cmd_msg(-3.5)))  # max decel — must pass
     self.assertFalse(self._tx(self._longitudinal_cmd_msg(2.1)))  # above max accel — must block
-    self.assertFalse(self._tx(self._longitudinal_cmd_msg(-4.1))) # below min accel — must block
+    self.assertFalse(self._tx(self._longitudinal_cmd_msg(-3.6))) # below min accel — must block
+
+  def _cam_frame(self, name, values, bus):
+    return self.packer.make_can_msg_safety(name, bus, values)
+
+  def test_camera_hard_brake_frame_passes_unchanged(self):
+    # Below the limit only the camera's own FSM3, just received and unchanged, and only while OP's long is allowed
+    hard = {"ACC_AccelerationRequest": -4.5, "ACC_Check": 0, "FrameKind": 0x81}
+    self.safety.set_timer(100000)
+    self.safety.set_controls_allowed(True)
+    self.assertFalse(self._tx(self._cam_frame("FSM3", hard, VOLVO_MAIN_BUS)))  # not received from the camera
+    self._rx(self._cam_frame("FSM3", hard, VOLVO_CAM_BUS))
+    self.assertTrue(self._tx(self._cam_frame("FSM3", hard, VOLVO_MAIN_BUS)))
+    self.assertFalse(self._tx(self._cam_frame("FSM3", hard | {"ACC_Check": 1}, VOLVO_MAIN_BUS)))  # changed
+    self.safety.set_timer(100000 + 200000)
+    self.assertFalse(self._tx(self._cam_frame("FSM3", hard, VOLVO_MAIN_BUS)))  # too old
+    self._rx(self._cam_frame("FSM3", hard, VOLVO_CAM_BUS))
+    self._rx(self._user_gas_msg(True))
+    self.assertFalse(self._tx(self._cam_frame("FSM3", hard, VOLVO_MAIN_BUS)))  # driver on the gas
+    self._rx(self._user_gas_msg(False))
+    self.safety.set_controls_allowed(False)
+    self.assertFalse(self._tx(self._cam_frame("FSM3", hard, VOLVO_MAIN_BUS)))  # controls not allowed
+
+  def test_fsm4_brake_request_needs_long_allowed_or_camera_frame(self):
+    brake = {"ACC_BrakeRequest": 1, "ACC_BrakeTarget": 12900, "Byte_5_b7": 1}
+    no_brake = {"ACC_BrakeRequest": 0, "ACC_BrakeTarget": 13328, "Byte_5_b7": 1}
+    self.safety.set_timer(100000)
+    for controls_allowed in (False, True):
+      for gas in (False, True):
+        self.safety.set_controls_allowed(controls_allowed)
+        self._rx(self._user_gas_msg(gas))
+        allowed = controls_allowed and not gas
+        self.assertTrue(self._tx(self._cam_frame("FSM4", no_brake, VOLVO_MAIN_BUS)), f"{controls_allowed=} {gas=}")
+        self.assertEqual(allowed, self._tx(self._cam_frame("FSM4", brake, VOLVO_MAIN_BUS)), f"{controls_allowed=} {gas=}")
+    # the camera's own brake request goes back unchanged even without OP's long (ACC off, driver on the gas)
+    self.safety.set_controls_allowed(False)
+    self._rx(self._cam_frame("FSM4", brake, VOLVO_CAM_BUS))
+    self.assertTrue(self._tx(self._cam_frame("FSM4", brake, VOLVO_MAIN_BUS)))
+    self.assertFalse(self._tx(self._cam_frame("FSM4", brake | {"ACC_BrakeTarget": 12000}, VOLVO_MAIN_BUS)))
 
   def test_fwd_hook_blocks_fsm_when_controls_allowed(self):
     # When controls are allowed and gas is not pressed, OP relays FSM1/FSM3 itself,
-    # so stock cam→main messages for those addrs must be blocked.
+    # so stock cam->main messages for those addrs must be blocked.
     for controls_allowed in (True, False):
       for gas_pressed in (True, False):
         self.safety.set_controls_allowed(controls_allowed)
         self._rx(self._user_gas_msg(gas_pressed))
         for addr in (0x260, 0x270):  # VOLVO_EUCD_FSM1, VOLVO_EUCD_FSM3
-          result = self.safety.safety_fwd_hook(self.VOLVO_CAM_BUS, addr)
+          result = self.safety.safety_fwd_hook(VOLVO_CAM_BUS, addr)
           should_block = controls_allowed and not gas_pressed
-          expected = -1 if should_block else self.VOLVO_MAIN_BUS
+          expected = -1 if should_block else VOLVO_MAIN_BUS
           self.assertEqual(expected, result, f"{addr=:#x} {controls_allowed=} {gas_pressed=}")
+
+  def test_lka_state_flip_is_a_mads_press(self):
+    # Each LKA_State flip is one press; the first frame and repeated frames are not
+    self.safety.set_safety_hooks(CarParams.SafetyModel.volvo, 0)
+    presses = []
+    for lka in (1, 1, 0, 0, 1):
+      self.lka_state = lka
+      self._rx(self._ccbuttons_msg())
+      presses.append(self.safety.get_mads_button_press())
+    self.assertEqual([0, 0, 1, 0, 1], presses)
+
+  def test_acc_available_is_acc_main_on(self):
+    for available in (True, False, True):
+      self._rx(self._acc_state_msg(available))
+      self.assertEqual(available, self.safety.get_acc_main_on())
+
+  def test_gas_in_op_stop_keeps_camera_fsm_off_the_ecm(self):
+    # In OP's stop the camera's FSM1/FSM3 stay off the ECM also on the gas; OP's FSM3 carries no accel
+    def forwarded():
+      return {addr: self.safety.safety_fwd_hook(VOLVO_CAM_BUS, addr) == VOLVO_MAIN_BUS for addr in (0x260, 0x270)}
+    standby_view = self.packer.make_can_msg_safety("EngineData", VOLVO_CAM_BUS, {"ACC_State_ECM": 2})
+    engaged_view = self.packer.make_can_msg_safety("EngineData", VOLVO_CAM_BUS, {"ACC_State_ECM": 3})
+    self.safety.set_controls_allowed(True)
+    self._rx(self._pcm_status_msg(True))
+    self._rx(self._user_gas_msg(True))
+    self.assertEqual({0x260: True, 0x270: True}, forwarded())  # driver's gas: the camera's frames to the ECM
+    self.assertTrue(self._tx(engaged_view))
+    self.assertEqual({0x260: True, 0x270: True}, forwarded())  # the camera sees the ECM: not OP's stop
+    self.assertTrue(self._tx(standby_view))
+    self.assertEqual({0x260: False, 0x270: False}, forwarded())
+    self.assertTrue(self._tx(self._longitudinal_cmd_msg(0.0)))
+    self.assertFalse(self._tx(self._longitudinal_cmd_msg(1.0)))
+    self.assertFalse(self._tx(self._longitudinal_cmd_msg(-1.0)))
+    # kept a few ECM frames after OP stops showing standby, then the camera's frames again
+    for _ in range(2):
+      self._rx(self._pcm_status_msg(True))
+    self.assertEqual({0x260: False, 0x270: False}, forwarded())
+    self._rx(self._pcm_status_msg(True))
+    self.assertEqual({0x260: True, 0x270: True}, forwarded())
+    # standby shown without the ECM engaged, or without controls allowed: not OP's stop
+    self._rx(self._pcm_status_msg(False))
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self._tx(standby_view))
+    self.assertEqual({0x260: True, 0x270: True}, forwarded())
+    self._rx(self._pcm_status_msg(True))
+    self.safety.set_controls_allowed(False)
+    self.assertTrue(self._tx(standby_view))
+    self.safety.set_controls_allowed(True)
+    self.assertEqual({0x260: True, 0x270: True}, forwarded())
+    # a new safety mode starts without it
+    self.assertTrue(self._tx(standby_view))
+    self.safety.set_safety_hooks(CarParams.SafetyModel.volvo, 0)
+    self.safety.set_controls_allowed(True)
+    self._rx(self._user_gas_msg(True))
+    self.assertEqual({0x260: True, 0x270: True}, forwarded())
 
   # Volvo gates the angle command on engagement, not on the LKASteerDirection flag (which
   # drops to NONE mid-control during the anti-windup pause), and uses inactive_angle_is_zero:
@@ -194,6 +320,7 @@ class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
         # When disabled, only a zero angle is allowed (inactive_angle_is_zero)
         self.safety.set_controls_allowed(0)
         self.assertEqual(a == 0, self._tx(self._angle_cmd_msg(a, False)))
+
 
 if __name__ == "__main__":
   unittest.main()

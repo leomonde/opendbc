@@ -22,10 +22,14 @@ STOCK = {
 ALL_FRAMES = [(kind, mode, bytes.fromhex(h)) for (kind, mode), hs in STOCK.items() for h in hs]
 
 
+def parse(name: str, addr: int, freq: int, dat: bytes) -> dict:
+  cp = CANParser(DBC, [(name, freq)], 0)
+  cp.update([(0, [(addr, dat, 0)])])
+  return copy.copy(cp.vl[name])
+
+
 def parse_fsm3(dat: bytes) -> dict:
-  cp = CANParser(DBC, [("FSM3", 50)], 0)
-  cp.update([(0, [(FSM3, dat, 0)])])
-  return copy.copy(cp.vl["FSM3"])
+  return parse("FSM3", FSM3, 50, dat)
 
 
 def build(stock: bytes, accel=None, mode=None) -> bytes:
@@ -42,7 +46,7 @@ def test_relay_is_byte_identical(kind, mode, stock):
 
 @pytest.mark.parametrize("kind,mode,stock", ALL_FRAMES)
 def test_stock_mode_and_traction_reproduce_frame(kind, mode, stock):
-  # feeding the camera's own mode back must not touch Byte_2; BRAKE frames also match Byte_3 (always 0)
+  # Camera's own mode leaves Byte_2 untouched
   out = build(stock, mode=mode)
   assert out[2] == stock[2]
   assert out[:2] == stock[:2] and out[4:] == stock[4:]
@@ -79,7 +83,7 @@ def test_mode_hysteresis():
   assert m == LongMode.COAST
   m = volvocan.next_long_mode(m, CCP.BRAKE_ENTER - 0.01)
   assert m == LongMode.BRAKE
-  m = volvocan.next_long_mode(m, CCP.BRAKE_EXIT - 0.05)  # stays braking until accel back to BRAKE_EXIT
+  m = volvocan.next_long_mode(m, CCP.BRAKE_EXIT - 0.05)  # stays braking until BRAKE_EXIT
   assert m == LongMode.BRAKE
   m = volvocan.next_long_mode(m, CCP.BRAKE_EXIT + 0.05)
   assert m == LongMode.COAST
@@ -89,7 +93,7 @@ def test_mode_hysteresis():
   assert m == LongMode.DRIVE
   m = volvocan.next_long_mode(m, 0.05)
   assert m == LongMode.DRIVE
-  m = volvocan.next_long_mode(m, -1.0)  # hard brake request goes straight from DRIVE to BRAKE
+  m = volvocan.next_long_mode(m, -1.0)  # hard brake: DRIVE straight to BRAKE
   assert m == LongMode.BRAKE
   m = volvocan.next_long_mode(m, 1.0)
   assert m == LongMode.DRIVE
@@ -100,12 +104,6 @@ FSM1 = 0x260
 # stock camera frames, route 00000808 (ACC engaged)
 STOCK_FSM4 = ["aaf1343a8ef24600", "aaf15e5e8af3cb00", "aaf173748ab40b00", "aaf173738ab3f800"]  # Byte_5 0xF2/0xF3 brake, 0xB4/0xB3 not
 STOCK_FSM1 = ["ffffb80049e37408", "5ad4bc0049e37408", "46ff000000e31408", "23f4040000e31408"]  # Byte_2 data 0xB8/0xBC, type 0x00/0x04
-
-
-def parse(name: str, addr: int, freq: int, dat: bytes) -> dict:
-  cp = CANParser(DBC, [(name, freq)], 0)
-  cp.update([(0, [(addr, dat, 0)])])
-  return copy.copy(cp.vl[name])
 
 
 @pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_FSM4])
@@ -128,12 +126,12 @@ def test_fsm4_op_brake_sets_value_from_accel(stock, accel):
 
 
 def test_fsm4_brake_value_matches_stock_levels():
-  # high byte reproduces the stock camera Byte_5 levels: F0 at -3.5, F4 near 0 (808)
+  # Matches the stock Byte_5 levels
   assert volvocan.fsm4_brake_value(-3.5, True) >> 8 == 0xF0
   assert volvocan.fsm4_brake_value(0.0, True) >> 8 == 0xF4
   values = [volvocan.fsm4_brake_value(a / 10, True) for a in range(-40, 5)]
   assert values == sorted(values)  # stronger decel, lower value
-  # smooth like stock (~1 count/frame): a 0.02 m/s^2 step moves it by a few counts, never a byte jump
+  # Smooth: a small step moves a few counts
   assert all(abs(volvocan.fsm4_brake_value(a / 50, True) - volvocan.fsm4_brake_value((a + 1) / 50, True)) < 16 for a in range(-200, 10))
 
 
@@ -208,10 +206,14 @@ STOCK_BRAKE_REQ_ACK = ["40054c020dff2235", "4005480201f72239"]
 
 @pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_WHEELSPEED1])
 @pytest.mark.parametrize("mask", [False, True])
-def test_wheelspeed1_relay_to_camera(stock, mask):
-  addr, dat, bus = volvocan.create_cam_wheel_status(CANPacker(DBC), parse("wheelspeed1", WHEELSPEED1_ADDR, 50, stock), mask)
+@pytest.mark.parametrize("show_standby", [False, True])
+def test_wheelspeed1_relay_to_camera(stock, mask, show_standby):
+  addr, dat, bus = volvocan.create_cam_wheel_status(CANPacker(DBC), parse("wheelspeed1", WHEELSPEED1_ADDR, 50, stock), mask,
+                                                         show_standby=show_standby)
   assert (addr, bus) == (WHEELSPEED1_ADDR, 2)
-  assert dat[2] == (stock[2] & ~0x04 if mask else stock[2])  # 0xE4 -> 0xE0, 0xE5 -> 0xE1
+  # brake request (bit2) masked: 0xE4 -> 0xE0, 0xE5 -> 0xE1; ACC brake applied (bit0) hidden only in the standby view (E)
+  masked_bits = (0x04 if mask else 0) | (0x01 if show_standby else 0)
+  assert dat[2] == stock[2] & ~masked_bits
   assert dat[:2] == stock[:2] and dat[3:] == stock[3:]
 
 
@@ -225,7 +227,7 @@ def test_brake_req_ack_relay_to_camera(stock, mask):
 
 
 FSM0 = 0x51
-# camera frames, route 00000816: before (ACC enabled, no lead) and after its abort (0x82, code 0x10, Byte_7 bit2)
+# Camera FSM0 before and after an abort, route 816
 FSM0_OK = bytes.fromhex("15e3860091955f7a")
 FSM0_ABORT = bytes.fromhex("15e3821091955f7e")
 
@@ -248,7 +250,7 @@ def test_fsm0_never_enabled_without_ecm():
 ENGINE_DATA = 0x12A
 
 
-# stock car frames (route 823 / 821): Byte_4 0xA8 standby, 0x98 just turned off, 0xB8 engaged
+# Stock 0x12A Byte_4: 0xA8 standby, 0x98 off, 0xB8 engaged
 @pytest.mark.parametrize("b4,state", [(0xA8, EcmAccState.STANDBY), (0x98, EcmAccState.OFF), (0xB8, EcmAccState.ENGAGED)])
 def test_ecm_acc_state_decoding(b4, state):
   dat = bytes([0xEA, 0x00, 0xC7, 0xF8, b4, 0xF8, 0xE5, 0x7A])
@@ -256,7 +258,7 @@ def test_ecm_acc_state_decoding(b4, state):
 
 
 def test_cam_brake_mask_msgs_are_relayed_messages():
-  # only messages carcontroller relays to the camera can be masked
+  # Only relayed messages can be masked
   assert CarControllerParams.CAM_BRAKE_MASK_MSGS <= {"BrakeLevel", "BrakeStatus", "wheelspeed1", "BrakeReqAck"}
 
 
@@ -274,13 +276,14 @@ def test_brake_req_ack_spoofs_ack(stock):
   assert dat[:5] == stock[:5] and dat[6:] == stock[6:]
 
 
-def test_fsm4_blends_brake_target_into_camera():
-  stock = bytes.fromhex(STOCK_FSM4[0])  # camera braking (Byte_5 bit6)
-  fsm4 = parse("FSM4", FSM4, 33, stock)
-  cam_value = ((stock[5] << 8) | stock[6]) & 0x3FFF
-  op = volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE)[1]
-  op_value = ((op[5] << 8) | op[6]) & 0x3FFF
-  half = volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE, cam_weight=0.5)[1]
-  assert ((half[5] << 8) | half[6]) & 0x3FFF == round(op_value + 0.5 * (cam_value - op_value))
-  full = volvocan.create_fsm4(CANPacker(DBC), fsm4, -1.0, LongMode.BRAKE, cam_weight=1.0)[1]
-  assert ((full[5] << 8) | full[6]) & 0x3FFF == cam_value and full[5] & 0x40
+def test_resume_button_copies_the_cem_frame():
+  stock = bytes.fromhex("88108761a7ff0000")  # CEM's CCButtons, no button pressed (route 89e)
+  addr, dat, bus = volvocan.create_resume_button(CANPacker(DBC), parse("CCButtons", 0x127, 50, stock))
+  assert (addr, bus) == (0x127, 0)
+  pressed = parse("CCButtons", 0x127, 50, dat)
+  assert pressed["ACCResumeBtn"] == 1 and pressed["ACCResumeBtnInv"] == 0
+  # only the Resume bits differ from the CEM's frame: b7 bit5 set, its inverted copy b5 bit5 cleared
+  expected = bytearray(stock)
+  expected[5] &= ~0x20
+  expected[7] |= 0x20
+  assert dat == bytes(expected)

@@ -1,6 +1,6 @@
 import numpy as np
 
-from opendbc.car.volvo.values import CANBUS, CarControllerParams, LongMode
+from opendbc.car.volvo.values import CANBUS, CarControllerParams, EcmAccState, LongMode
 
 
 def create_button_msg(packer, resume=False, cancel=False, set_plus=False, minus=False, bus=0):
@@ -93,13 +93,16 @@ def _copy(stock, skip=()):
   return {k: v for k, v in stock.items() if k not in skip}
 
 
-def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | None = None):
-  # Camera FSM3 with OP's accel, ACC_Check, mode and traction
+def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | None = None, standstill: bool | None = None):
+  # Camera FSM3 with OP's accel, ACC_Check, mode and traction; standstill set = OP's stop to 0
   values = _copy(stock_fsm3)
   values |= {
     "ACC_AccelerationRequest": accel,
     "ACC_Check": acc_check,
   }
+  if standstill is not None:
+    values["ACC_Standstill"] = int(standstill)
+    values["ACC_NoTargetCancel"] = 0
   if mode is not None:
     values["ACC_Mode"] = int(mode)
     values["ACC_TractionRequest"] = fsm3_traction(accel, mode)
@@ -113,18 +116,13 @@ def fsm4_brake_value(accel: float, brake: bool) -> int:
   return 0x8000 | (0x4000 if brake else 0) | int(round(float(np.interp(accel, bp, v))))
 
 
-def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None, cam_weight: float = 0.):
+def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None):
   # Camera FSM4; brake flag and target follow OP's accel when either side brakes
   values = _copy(stock_fsm4)
   op_brake = mode == LongMode.BRAKE
   cam_brake = bool(stock_fsm4["ACC_BrakeRequest"])
   if mode is not None and (op_brake or cam_brake):
     value = fsm4_brake_value(accel, op_brake)
-    if cam_weight > 0. and op_brake and cam_brake:
-      # Blend into the camera's target during its stop
-      cam_value = int(stock_fsm4["ACC_BrakeTarget"])
-      blended = int(round((value & 0x3FFF) + cam_weight * (cam_value - (value & 0x3FFF))))
-      value = (value & 0xC000) | blended
     values["Byte_5_b7"] = (value >> 15) & 1
     values["ACC_BrakeRequest"] = (value >> 14) & 1
     values["ACC_BrakeTarget"] = value & 0x3FFF
@@ -155,24 +153,72 @@ def create_cam_brake_level(packer, stock_brake_level, frozen_level: int | None):
   return packer.make_can_msg("BrakeLevel", CANBUS.cam, values)
 
 
-def create_cam_wheel_status(packer, stock_wheelspeed1, mask: bool, spoof: bool = False):
-  # wheelspeed1 to the camera; brake request bit masked or spoofed
+def create_cam_wheel_status(packer, stock_wheelspeed1, mask: bool, spoof: bool = False, hide_hold: bool = False,
+                            show_standby: bool = False):
+  # wheelspeed1 to the camera: brake request masked or spoofed, standstill hold and standby-view ACC brake hidden
   values = _copy(stock_wheelspeed1, skip=("WhlSpdRR", "WhlSpdLR"))
   if mask:
     values["BrakeReqActive"] = 0
   elif spoof:
     values["BrakeReqActive"] = 1
+  if show_standby:
+    # set by the ECM in its brake mode: seen in standby the camera latches FC (routes 886/888), engaged it must stay (892)
+    values["ACC_BrakeApplied"] = 0
+  if hide_hold:
+    values["StandstillHold"] = 0
   return packer.make_can_msg("wheelspeed1", CANBUS.cam, values)
 
 
-def create_cam_brake_request_ack(packer, stock_brake_req_ack, mask: bool, spoof: bool = False):
-  # BrakeReqAck to the camera; brake ack (active low) masked or spoofed
+def create_cam_brake_request_ack(packer, stock_brake_req_ack, mask: bool, spoof: bool = False, hide_hold: bool = False):
+  # BrakeReqAck to the camera; brake ack (active low) masked or spoofed, standstill hold hidden
   values = _copy(stock_brake_req_ack)
   if mask:
     values["BrakeReqNotAck"] = 1
   elif spoof:
     values["BrakeReqNotAck"] = 0
+  if hide_hold:
+    values["StandstillHold"] = 0
   return packer.make_can_msg("BrakeReqAck", CANBUS.cam, values)
+
+
+def create_cam_button(packer, stock_ccbuttons, set_plus: bool):
+  # CEM's CCButtons to the camera, Set pressed if set_plus; the other bytes as the CEM's (the camera rejects zeroed ones)
+  values = _copy(stock_ccbuttons)
+  if set_plus:
+    values |= {"ACCSetBtn": 1, "ACCSetBtnInv": 0}
+  return packer.make_can_msg("CCButtons", CANBUS.cam, values)
+
+
+def create_resume_button(packer, stock_ccbuttons):
+  # CEM's CCButtons to the ECM with Resume pressed, the other bytes as the CEM's
+  values = _copy(stock_ccbuttons)
+  values |= {"ACCResumeBtn": 1, "ACCResumeBtnInv": 0}
+  return packer.make_can_msg("CCButtons", CANBUS.pt, values)
+
+
+def create_cam_engine_data(packer, stock_engine_data, show_standby: bool):
+  # EngineData to the camera; show_standby: ECM engaged shown as standby (driver cancelled), as in route 881
+  values = _copy(stock_engine_data)
+  if show_standby and int(values["ACC_State_ECM"]) == EcmAccState.ENGAGED:
+    values["ACC_State_ECM"] = EcmAccState.STANDBY
+    values["Byte_2"] = int(values["Byte_2"]) & ~0x20  # E7 -> C7
+  return packer.make_can_msg("EngineData", CANBUS.cam, values)
+
+
+def create_cam_acc_hold(packer, stock_acc_hold, show_standby: bool):
+  # 0x325 to the camera; show_standby: no ACC engaged (C4) nor ACC standstill hold (87), as standby (84)
+  values = _copy(stock_acc_hold)
+  if show_standby:
+    values |= {"ACC_Engaged": 0, "ACC_StandstillHold": 0}
+  return packer.make_can_msg("AccHold", CANBUS.cam, values)
+
+
+def create_cam_brake_hold(packer, stock_brake_hold, frozen_b0: int | None):
+  # 0x1FF to the camera; b0 held during OP's stop to 0 (its 0x70 -> 0xD0 fires the camera's brake alert)
+  values = _copy(stock_brake_hold)
+  if frozen_b0 is not None:
+    values["Byte_0"] = frozen_b0
+  return packer.make_can_msg("BrakeHold", CANBUS.cam, values)
 
 
 def create_radar(packer, stock_fsm1, mode: LongMode | None = None):
