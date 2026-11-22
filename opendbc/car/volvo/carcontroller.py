@@ -15,7 +15,7 @@ from opendbc.sunnypilot.car.volvo.icbm import IntelligentCruiseButtonManagementI
 
 try:
   from openpilot.common.params import Params
-except ImportError:
+except (ImportError, OSError):  # not built: no custom ACC step
   Params = None
 
 
