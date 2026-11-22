@@ -14,13 +14,13 @@ VOLVO_CAM_BUS = 2
 
 class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
   TX_MSGS = [[0x051, VOLVO_MAIN_BUS], [0x127, VOLVO_MAIN_BUS], [0x260, VOLVO_MAIN_BUS], [0x262, VOLVO_MAIN_BUS],
-             [0x270, VOLVO_MAIN_BUS], [0x31A, VOLVO_MAIN_BUS], [0x246, VOLVO_CAM_BUS], [0x133, VOLVO_CAM_BUS],
-             [0x323, VOLVO_CAM_BUS], [0x220, VOLVO_CAM_BUS], [0x299, VOLVO_CAM_BUS], [0x1FF, VOLVO_CAM_BUS],
+             [0x270, VOLVO_MAIN_BUS], [0x31A, VOLVO_MAIN_BUS], [0x246, VOLVO_CAM_BUS],
+             [0x220, VOLVO_CAM_BUS], [0x299, VOLVO_CAM_BUS], [0x1FF, VOLVO_CAM_BUS],
              [0x127, VOLVO_CAM_BUS], [0x325, VOLVO_CAM_BUS], [0x12A, VOLVO_CAM_BUS]]
   GAS_PRESSED_THRESHOLD = 10
   STANDSTILL_THRESHOLD = 0.1
-  RELAY_MALFUNCTION_ADDRS = {VOLVO_MAIN_BUS: [0x051, 0x262, 0x31A], VOLVO_CAM_BUS: [0x246, 0x133, 0x323, 0x220, 0x299, 0x1FF, 0x325, 0x12A, 0x127]}
-  FWD_BLACKLISTED_ADDRS = {VOLVO_CAM_BUS: [0x051, 0x262, 0x31A], VOLVO_MAIN_BUS: [0x051, 0x246, 0x133, 0x323, 0x220, 0x299, 0x1FF, 0x325, 0x12A, 0x127]}
+  RELAY_MALFUNCTION_ADDRS = {VOLVO_MAIN_BUS: [0x051, 0x262, 0x31A], VOLVO_CAM_BUS: [0x246, 0x220, 0x299, 0x1FF, 0x325, 0x12A, 0x127]}
+  FWD_BLACKLISTED_ADDRS = {VOLVO_CAM_BUS: [0x051, 0x262, 0x31A], VOLVO_MAIN_BUS: [0x051, 0x246, 0x220, 0x299, 0x1FF, 0x325, 0x12A, 0x127]}
 
   # Angle control limits
   STEER_ANGLE_MAX = 90  # deg, matches CarControllerParams.ANGLE_LIMITS
@@ -119,6 +119,12 @@ class TestVolvoSafety(common.CarSafetyTest, common.AngleSteeringSafetyTest):
   def _user_gas_msg(self, gas):
     values = {"AccPedal": 10 if gas else 0}
     return self.packer.make_can_msg_safety("AccPedal", VOLVO_MAIN_BUS, values)
+
+  def test_gas_press_and_release_have_hysteresis(self):
+    # A foot held at 10% flickered gas each frame and OP's long with it (route 00000007): 10% presses, under 9% releases
+    for pedal, pressed in ((9.9, False), (10, True), (9.9, True), (9, True), (8.9, False), (9.9, False), (10, True)):
+      self._rx(self.packer.make_can_msg_safety("AccPedal", VOLVO_MAIN_BUS, {"AccPedal": pedal}))
+      self.assertEqual(pressed, self.safety.get_gas_pressed_prev(), f"{pedal=}")
 
   def _speed_msg_2(self, speed):
     return None

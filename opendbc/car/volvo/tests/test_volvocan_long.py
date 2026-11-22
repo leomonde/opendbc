@@ -3,7 +3,8 @@ import math
 
 import pytest
 
-from opendbc.can import CANPacker, CANParser
+from opendbc.can import CANPacker
+from opendbc.can import CANParser
 from opendbc.car.volvo import volvocan
 from opendbc.car.volvo.values import CarControllerParams, EcmAccState, LongMode
 
@@ -99,6 +100,23 @@ def test_mode_hysteresis():
   assert m == LongMode.DRIVE
 
 
+def test_brake_enters_earlier_when_slower():
+  # Route 22: below 20 km/h the camera brakes from -0.1; coasting there let D creep the car toward the lead
+  kph = 1 / 3.6
+  assert volvocan.next_long_mode(LongMode.COAST, -0.15, v_ego=8 * kph) == LongMode.BRAKE
+  assert volvocan.next_long_mode(LongMode.COAST, -0.15, v_ego=30 * kph) == LongMode.COAST
+  assert volvocan.next_long_mode(LongMode.COAST, -0.35, v_ego=30 * kph) == LongMode.BRAKE
+  # highway unchanged
+  assert volvocan.next_long_mode(LongMode.COAST, -0.45, v_ego=100 * kph) == LongMode.COAST
+  assert volvocan.next_long_mode(LongMode.COAST, -0.55, v_ego=100 * kph) == LongMode.BRAKE
+  # slow: stays braking until OP asks for traction, never left with a decel request
+  assert volvocan.next_long_mode(LongMode.BRAKE, -0.01, v_ego=8 * kph) == LongMode.BRAKE
+  assert volvocan.next_long_mode(LongMode.BRAKE, 0.1, v_ego=8 * kph) == LongMode.DRIVE
+  for v in (0., 10., 25., 40., 120.):
+    enter, exit_ = volvocan.brake_thresholds(v * kph)
+    assert enter < exit_ <= 0.
+
+
 FSM4 = 0x31A
 FSM1 = 0x260
 # stock camera frames, route 00000808 (ACC engaged)
@@ -123,6 +141,12 @@ def test_fsm4_op_brake_sets_value_from_accel(stock, accel):
   assert value == volvocan.fsm4_brake_value(accel, True)
   assert value & 0xC000 == 0xC000  # bit15 always, bit14 = hydraulic brake request
   assert out[:5] == stock[:5] and out[7:] == stock[7:]
+
+
+@pytest.mark.parametrize("accel, camera", [(-3.0, 12568), (-2.5, 12688), (-2.0, 12821), (-1.0, 13084), (-0.5, 13212)])
+def test_fsm4_brake_value_as_the_camera(accel, camera):
+  # Route 29, 1110 s: the old map asked ~0.5 m/s^2 less than the camera at -2.8 and the stop ended at 1.5 m
+  assert abs((volvocan.fsm4_brake_value(accel, True) & 0x3FFF) - camera) <= 10
 
 
 def test_fsm4_brake_value_matches_stock_levels():
@@ -164,66 +188,32 @@ def test_fsm1_brake_bit_follows_op(stock, mode):
   assert out[:2] == stock[:2] and out[3:] == stock[3:]
 
 
-BRAKE_STATUS_ADDR = 0x323
-BRAKE_LEVEL_ADDR = 0x133
-# Stock BrakeStatus and BrakeLevel frames, route 807
-STOCK_BRAKE_STATUS = ["0000fc04c5800400", "0000fc04d5800400", "0000fc04e5800400"]
-STOCK_BRAKE_LEVEL = ["0b146e3cce370719", "0b2d6df6cdf60732"]
-
-
-@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_BRAKE_STATUS])
-def test_brake_status_relay_to_camera(stock):
-  addr, dat, bus = volvocan.create_cam_brake_status(CANPacker(DBC), parse("BrakeStatus", BRAKE_STATUS_ADDR, 25, stock), False)
-  assert (addr, dat, bus) == (BRAKE_STATUS_ADDR, stock, 2)
-
-
-@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_BRAKE_STATUS])
-def test_brake_status_mask_clears_brake_ack(stock):
-  out = volvocan.create_cam_brake_status(CANPacker(DBC), parse("BrakeStatus", BRAKE_STATUS_ADDR, 25, stock), True)[1]
-  assert out[4] == stock[4] & ~0x10  # 0xD5 -> 0xC5, others unchanged
-  assert out[:4] == stock[:4] and out[5:] == stock[5:]
-
-
-@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_BRAKE_LEVEL])
-def test_brake_level_relay_to_camera(stock):
-  addr, dat, bus = volvocan.create_cam_brake_level(CANPacker(DBC), parse("BrakeLevel", BRAKE_LEVEL_ADDR, 50, stock), None)
-  assert (addr, dat, bus) == (BRAKE_LEVEL_ADDR, stock, 2)
-
-
-@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_BRAKE_LEVEL])
-def test_brake_level_mask_holds_brake_level(stock):
-  out = volvocan.create_cam_brake_level(CANPacker(DBC), parse("BrakeLevel", BRAKE_LEVEL_ADDR, 50, stock), 0x14)[1]
-  assert out[1] == (stock[1] & 0x80) | 0x14
-  assert out[0] == stock[0] and out[2:] == stock[2:]
-
-
-WHEELSPEED1_ADDR = 0x220
+WHEEL_REAR_ADDR = 0x220
 BRAKE_REQ_ACK_ADDR = 0x299
-# Stock wheelspeed1 and BrakeReqAck frames, route 816
-STOCK_WHEELSPEED1 = ["8b11e000a2577a30", "8b11e400a245a216", "8b11e500a1f6a1d3"]
+# Stock WheelRear and BrakeReqAck frames, route 816
+STOCK_WHEEL_REAR = ["8b11e000a2577a30", "8b11e400a245a216", "8b11e500a1f6a1d3"]
 STOCK_BRAKE_REQ_ACK = ["40054c020dff2235", "4005480201f72239"]
 
 
-@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_WHEELSPEED1])
-@pytest.mark.parametrize("mask", [False, True])
-@pytest.mark.parametrize("show_standby", [False, True])
-def test_wheelspeed1_relay_to_camera(stock, mask, show_standby):
-  addr, dat, bus = volvocan.create_cam_wheel_status(CANPacker(DBC), parse("wheelspeed1", WHEELSPEED1_ADDR, 50, stock), mask,
-                                                         show_standby=show_standby)
-  assert (addr, bus) == (WHEELSPEED1_ADDR, 2)
-  # brake request (bit2) masked: 0xE4 -> 0xE0, 0xE5 -> 0xE1; ACC brake applied (bit0) hidden only in the standby view (E)
-  masked_bits = (0x04 if mask else 0) | (0x01 if show_standby else 0)
-  assert dat[2] == stock[2] & ~masked_bits
-  assert dat[:2] == stock[:2] and dat[3:] == stock[3:]
+@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_WHEEL_REAR])
+@pytest.mark.parametrize("standby", [False, True])
+def test_wheel_rear_relay_to_camera(stock, standby):
+  addr, dat, bus = volvocan.create_cam_wheel_status(CANPacker(DBC), parse("WheelRear", WHEEL_REAR_ADDR, 50, stock), standby)
+  assert (addr, bus) == (WHEEL_REAR_ADDR, 2)
+  # standby: no brake request (bit2) nor ACC brake applied (bit0), 0xE5 -> 0xE0, and no hold (b0 bit6)
+  assert dat[2] == (stock[2] & ~0x05 if standby else stock[2])
+  assert dat[0] == (stock[0] & ~0x40 if standby else stock[0])
+  assert dat[1] == stock[1] and dat[3:] == stock[3:]
 
 
 @pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_BRAKE_REQ_ACK])
-@pytest.mark.parametrize("mask", [False, True])
-def test_brake_req_ack_relay_to_camera(stock, mask):
-  addr, dat, bus = volvocan.create_cam_brake_request_ack(CANPacker(DBC), parse("BrakeReqAck", BRAKE_REQ_ACK_ADDR, 50, stock), mask)
+@pytest.mark.parametrize("standby", [False, True])
+def test_brake_req_ack_relay_to_camera(stock, standby):
+  addr, dat, bus = volvocan.create_cam_brake_request_ack(CANPacker(DBC), parse("BrakeReqAck", BRAKE_REQ_ACK_ADDR, 50, stock), standby)
   assert (addr, bus) == (BRAKE_REQ_ACK_ADDR, 2)
-  assert dat[5] == (stock[5] | 0x08 if mask else stock[5])  # 0xF7 -> 0xFF
-  assert dat[:5] == stock[:5] and dat[6:] == stock[6:]
+  assert dat[5] == (stock[5] | 0x08 if standby else stock[5])  # 0xF7 -> 0xFF
+  assert dat[0] == (stock[0] & ~0x80 if standby else stock[0])
+  assert dat[1:5] == stock[1:5] and dat[6:] == stock[6:]
 
 
 FSM0 = 0x51
@@ -257,25 +247,6 @@ def test_ecm_acc_state_decoding(b4, state):
   assert int(parse("EngineData", ENGINE_DATA, 66, dat)["ACC_State_ECM"]) == state
 
 
-def test_cam_brake_mask_msgs_are_relayed_messages():
-  # Only relayed messages can be masked
-  assert CarControllerParams.CAM_BRAKE_MASK_MSGS <= {"BrakeLevel", "BrakeStatus", "wheelspeed1", "BrakeReqAck"}
-
-
-@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_WHEELSPEED1])
-def test_wheelspeed1_spoofs_brake_request(stock):
-  dat = volvocan.create_cam_wheel_status(CANPacker(DBC), parse("wheelspeed1", WHEELSPEED1_ADDR, 50, stock), False, True)[1]
-  assert dat[2] == stock[2] | 0x04
-  assert dat[:2] == stock[:2] and dat[3:] == stock[3:]
-
-
-@pytest.mark.parametrize("stock", [bytes.fromhex(h) for h in STOCK_BRAKE_REQ_ACK])
-def test_brake_req_ack_spoofs_ack(stock):
-  dat = volvocan.create_cam_brake_request_ack(CANPacker(DBC), parse("BrakeReqAck", BRAKE_REQ_ACK_ADDR, 50, stock), False, True)[1]
-  assert dat[5] == stock[5] & ~0x08  # 0xFF -> 0xF7
-  assert dat[:5] == stock[:5] and dat[6:] == stock[6:]
-
-
 def test_resume_button_copies_the_cem_frame():
   stock = bytes.fromhex("88108761a7ff0000")  # CEM's CCButtons, no button pressed (route 89e)
   addr, dat, bus = volvocan.create_resume_button(CANPacker(DBC), parse("CCButtons", 0x127, 50, stock))
@@ -287,3 +258,16 @@ def test_resume_button_copies_the_cem_frame():
   expected[5] &= ~0x20
   expected[7] |= 0x20
   assert dat == bytes(expected)
+
+
+@pytest.mark.parametrize("standby", [False, True])
+def test_camera_buttons_engaging_released_in_standby(standby):
+  # Set+ to raise the ECM's speed would engage the camera's ACC while it is shown standby
+  packer = CANPacker(DBC)
+  pressed = {"ACCSetBtn": 1, "ACCSetBtnInv": 0, "ACCMinusBtn": 1, "ACCMinusBtnInv": 0, "ACCResumeBtn": 1, "ACCResumeBtnInv": 0,
+             "ACCOnOffBtn": 0, "ACCOnOffBtnInv": 1, "TimeGapIncreaseBtn": 1, "TimeGapIncreaseBtnInv": 0, "LKA_State": 1}
+  stock = packer.make_can_msg("CCButtons", 0, pressed)[1]
+  out = parse("CCButtons", 0x127, 66, volvocan.create_cam_button(packer, parse("CCButtons", 0x127, 66, stock), standby)[1])
+  for btn in ("ACCSetBtn", "ACCMinusBtn", "ACCResumeBtn"):
+    assert out[btn] == (0 if standby else 1) and out[btn + "Inv"] == (1 if standby else 0)
+  assert out["TimeGapIncreaseBtn"] == 1 and out["LKA_State"] == 1 and out["ACCOnOffBtnInv"] == 1  # the rest as the CEM's

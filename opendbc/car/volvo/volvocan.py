@@ -4,7 +4,6 @@ from opendbc.car.volvo.values import CANBUS, CarControllerParams, EcmAccState, L
 
 
 def create_button_msg(packer, resume=False, cancel=False, set_plus=False, minus=False, bus=0):
-  # TODO: validate
   msg = {
     "ACCOnOffBtn": cancel,
     "ACCOnOffBtnInv": not cancel,
@@ -32,7 +31,7 @@ def create_lkas_state_msg(packer, steering_angle: float, stock_values: dict):
   return packer.make_can_msg("PSCM1", 2, msg)
 
 
-def calculate_lka_checksum(dat: bytearray) -> int:
+def calculate_lka_checksum(dat: bytes) -> int:
   steer_angle_request = ((dat[3] & 0x3F) << 8) + dat[4]
   steering_direction_request = dat[5] & 0x03
   trqlim = dat[2]
@@ -53,24 +52,34 @@ def create_lka_msg(packer, apply_steer: float, steer_direction: int):
     "SET_X_A4": 0xa7,
   }
 
-  # calculate checksum
+  # Checksum
   dat = packer.make_can_msg("FSM2", 0, values)[1]
   values["Checksum"] = calculate_lka_checksum(dat)
 
   return packer.make_can_msg("FSM2", 0, values)
 
 
-def next_long_mode(mode: LongMode, accel: float, brake_offset: float = 0.) -> LongMode:
+def brake_thresholds(v_ego: float | None) -> tuple[float, float]:
+  """BRAKE enter and exit accel at this speed; None is the highway's."""
+  CCP = CarControllerParams
+  if v_ego is None:
+    return CCP.BRAKE_ENTER, CCP.BRAKE_EXIT
+  enter = float(np.interp(v_ego, CCP.BRAKE_ENTER_BP, CCP.BRAKE_ENTER_V))
+  return enter, min(enter + CCP.BRAKE_HYSTERESIS, 0.)
+
+
+def next_long_mode(mode: LongMode, accel: float, brake_offset: float = 0., v_ego: float | None = None) -> LongMode:
   # brake_offset shifts the BRAKE thresholds by the slope
   CCP = CarControllerParams
+  brake_enter, brake_exit = brake_thresholds(v_ego)
   if mode == LongMode.BRAKE:
-    if accel <= CCP.BRAKE_EXIT + brake_offset:
+    if accel <= brake_exit + brake_offset:
       return LongMode.BRAKE
   elif mode == LongMode.DRIVE:
     if accel >= CCP.DRIVE_EXIT:
       return LongMode.DRIVE
   enter_offset = brake_offset * (1. + CCP.UPHILL_BRAKE_ENTER_EXTRA) if brake_offset < 0. else brake_offset
-  if accel < CCP.BRAKE_ENTER + enter_offset:
+  if accel < brake_enter + enter_offset:
     return LongMode.BRAKE
   if accel > CCP.DRIVE_ENTER:
     return LongMode.DRIVE
@@ -112,8 +121,10 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check, mode: LongMode | N
 def fsm4_brake_value(accel: float, brake: bool) -> int:
   # FSM4 brake word: 0x8000 | brake flag 0x4000 | 14-bit target
   CCP = CarControllerParams
-  bp, v = (CCP.FSM4_BRAKE_ACCEL_BP, CCP.FSM4_BRAKE_VALUE_V) if brake else (CCP.FSM4_NO_BRAKE_ACCEL_BP, CCP.FSM4_NO_BRAKE_VALUE_V)
-  return 0x8000 | (0x4000 if brake else 0) | int(round(float(np.interp(accel, bp, v))))
+  if brake:
+    lo, hi = CCP.FSM4_BRAKE_ACCEL_RANGE
+    return 0xC000 | int(round(CCP.FSM4_BRAKE_ZERO + CCP.FSM4_BRAKE_GAIN * min(max(accel, lo), hi)))
+  return 0x8000 | int(round(float(np.interp(accel, CCP.FSM4_NO_BRAKE_ACCEL_BP, CCP.FSM4_NO_BRAKE_VALUE_V))))
 
 
 def create_fsm4(packer, stock_fsm4, accel: float, mode: LongMode | None = None):
@@ -137,55 +148,27 @@ def create_fsm0(packer, stock_fsm0, ecm_engaged: bool):
   return packer.make_can_msg("FSM0", 0, values)
 
 
-def create_cam_brake_status(packer, stock_brake_status, mask: bool):
-  # BrakeStatus to the camera; masked clears brake applied
-  values = _copy(stock_brake_status)
-  if mask:
-    values["BrakeApplied"] = 0
-  return packer.make_can_msg("BrakeStatus", CANBUS.cam, values)
+def create_cam_wheel_status(packer, stock_wheel_rear, standby: bool):
+  # WheelRear to the camera; standby: no ACC brake request, applied brake nor hold (seen in standby it latches FC, routes 886/888)
+  values = _copy(stock_wheel_rear, skip=("WhlSpdRR", "WhlSpdLR"))
+  if standby:
+    values |= {"BrakeReqActive": 0, "ACC_BrakeApplied": 0, "StandstillHold": 0}
+  return packer.make_can_msg("WheelRear", CANBUS.cam, values)
 
 
-def create_cam_brake_level(packer, stock_brake_level, frozen_level: int | None):
-  # BrakeLevel to the camera; masked holds the brake level
-  values = _copy(stock_brake_level)
-  if frozen_level is not None:
-    values["BrakeLevel"] = frozen_level & 0x7F
-  return packer.make_can_msg("BrakeLevel", CANBUS.cam, values)
-
-
-def create_cam_wheel_status(packer, stock_wheelspeed1, mask: bool, spoof: bool = False, hide_hold: bool = False,
-                            show_standby: bool = False):
-  # wheelspeed1 to the camera: brake request masked or spoofed, standstill hold and standby-view ACC brake hidden
-  values = _copy(stock_wheelspeed1, skip=("WhlSpdRR", "WhlSpdLR"))
-  if mask:
-    values["BrakeReqActive"] = 0
-  elif spoof:
-    values["BrakeReqActive"] = 1
-  if show_standby:
-    # set by the ECM in its brake mode: seen in standby the camera latches FC (routes 886/888), engaged it must stay (892)
-    values["ACC_BrakeApplied"] = 0
-  if hide_hold:
-    values["StandstillHold"] = 0
-  return packer.make_can_msg("wheelspeed1", CANBUS.cam, values)
-
-
-def create_cam_brake_request_ack(packer, stock_brake_req_ack, mask: bool, spoof: bool = False, hide_hold: bool = False):
-  # BrakeReqAck to the camera; brake ack (active low) masked or spoofed, standstill hold hidden
+def create_cam_brake_request_ack(packer, stock_brake_req_ack, standby: bool):
+  # BrakeReqAck to the camera; standby: no brake ack (active low) nor hold
   values = _copy(stock_brake_req_ack)
-  if mask:
-    values["BrakeReqNotAck"] = 1
-  elif spoof:
-    values["BrakeReqNotAck"] = 0
-  if hide_hold:
-    values["StandstillHold"] = 0
+  if standby:
+    values |= {"BrakeReqNotAck": 1, "StandstillHold": 0}
   return packer.make_can_msg("BrakeReqAck", CANBUS.cam, values)
 
 
-def create_cam_button(packer, stock_ccbuttons, set_plus: bool):
-  # CEM's CCButtons to the camera, Set pressed if set_plus; the other bytes as the CEM's (the camera rejects zeroed ones)
+def create_cam_button(packer, stock_ccbuttons, standby: bool):
+  # CEM's CCButtons to the camera; standby: Set, Minus and Resume shown released, or the camera would engage its ACC
   values = _copy(stock_ccbuttons)
-  if set_plus:
-    values |= {"ACCSetBtn": 1, "ACCSetBtnInv": 0}
+  if standby:
+    values |= {"ACCSetBtn": 0, "ACCSetBtnInv": 1, "ACCMinusBtn": 0, "ACCMinusBtnInv": 1, "ACCResumeBtn": 0, "ACCResumeBtnInv": 1}
   return packer.make_can_msg("CCButtons", CANBUS.cam, values)
 
 
@@ -214,7 +197,7 @@ def create_cam_acc_hold(packer, stock_acc_hold, show_standby: bool):
 
 
 def create_cam_brake_hold(packer, stock_brake_hold, frozen_b0: int | None):
-  # 0x1FF to the camera; b0 held during OP's stop to 0 (its 0x70 -> 0xD0 fires the camera's brake alert)
+  # 0x1FF to the camera; b0 held while stopped (its 0x70 -> 0xD0 fires the camera's brake alert)
   values = _copy(stock_brake_hold)
   if frozen_b0 is not None:
     values["Byte_0"] = frozen_b0

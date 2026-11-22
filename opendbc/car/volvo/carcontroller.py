@@ -1,115 +1,115 @@
+"""Volvo V60 controller; with OP's long on, OP owns the ECM and the camera's ACC is shown standby."""
 import math
 
 from opendbc.can import CANPacker
 from opendbc.car import Bus, DT_CTRL
+from opendbc.car.interfaces import CarControllerBase
+from opendbc.car.lateral import apply_std_steer_angle_limits
+from opendbc.car.volvo.volvocan import (create_button_msg, create_lka_msg, create_lkas_state_msg, create_longitudinal,
+                                        create_fsm0, create_fsm4, create_radar, create_cam_wheel_status,
+                                        create_cam_brake_request_ack, create_cam_brake_hold, create_cam_engine_data,
+                                        create_resume_button, create_cam_acc_hold, create_cam_button, fsm4_brake_value,
+                                        next_long_mode)
+from opendbc.car.volvo.values import CarControllerParams, LongMode, SteerDirection
+from opendbc.sunnypilot.car.volvo.icbm import IntelligentCruiseButtonManagementInterface
 
 try:
   from openpilot.common.params import Params
 except ImportError:
   Params = None
-from opendbc.car.lateral import apply_std_steer_angle_limits
-from opendbc.car.interfaces import CarControllerBase
-from opendbc.car.volvo import volvocan
-from opendbc.car.volvo.full_stop import FullStop
-from opendbc.car.volvo.values import CarControllerParams, LongMode, SteerDirection
-from opendbc.sunnypilot.car.volvo.icbm import IntelligentCruiseButtonManagementInterface
-
-CCP = CarControllerParams
 
 
-def cam_brake_leftover(CS) -> bool:
-  """Camera still in brake mode with no target and no braking asked: its brake kept 6 s after a false target (route 8bd, 193.6 s)."""
-  return CS.acc_distance >= 255 and float(CS.stock_FSM3["ACC_AccelerationRequest"]) >= 0.
+def cam_clean(CS) -> bool:
+  """Camera engaged with no cancel nor abort: its frames can be the ECM's templates."""
+  fsm3 = CS.stock_FSM3
+  if fsm3["ACC_NoTargetCancel"] or int(fsm3["Byte_6"]):
+    return False
+  if any(f["ACC_AbortCode"] or not f["ACC_Enabled"] for f in CS.stock_FSM0_frames):
+    return False
+  return not any(int(f["Byte_2"]) == 0xFC for f in CS.stock_FSM4_frames)
 
 
 class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterface):
   def __init__(self, dbc_names, CP, CP_SP):
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
     IntelligentCruiseButtonManagementInterface.__init__(self, CP, CP_SP)
-    self.CP = CP
     self.CCP = CarControllerParams(CP)
-    self.packer_pt = CANPacker(dbc_names[Bus.pt])
+    self.packer = CANPacker(dbc_names[Bus.pt])
     self.frame = 0
-
-    # Lateral
+    # Custom ACC step, refreshed every 100 frames
+    self._params = Params() if Params is not None else None
+    self._custom_acc_step = self._read_acc_step()
     self.apply_steer_prev = 0
     self.apply_steer_dir_prev = SteerDirection.NONE
     self.latActive_prev = False
     self.steer_blocked = False
     self.steer_blocked_cnt = 0
     self.steer_dir_bf_block = SteerDirection.NONE
-
-    # Custom ACC step, refreshed every 100 frames
-    self._params = Params() if Params is not None else None
-    self._custom_acc_step = max(1, int(self._params.get("CustomAccShortPressIncrement", return_default=True) or 1)) if self._params is not None else 1
-
-    # Buttons: lead SNG
+    # Resume (SNG)
     self.last_resume_frame = 0
     self.distance = 0
     self.waiting = False
     self.sng_count = 0
     self.op_resume_frames = 0
-    self.sng_ack_frames = 0  # FSM3 ACC_Check=1 frames for OP's resume
+    self.sng_ack_frames = 0
     self.resume_hold_frames = 0  # Resume held to the ECM, frames left
     self.last_ccbuttons = None  # CEM's last CCButtons, copied for the Resume
-
-    # Downhill: set speed + offset to the planner
-    self.downhill = False
-    self.downhill_frames = 0  # frames the pitch has been past the enter/exit threshold
-
-    # FSM3/FSM1 sent at 50 Hz wall-clock
+    # Longitudinal
     self.next_long_tx_nanos = 0
-    self.LONG_TX_PERIOD_NANOS = 20_000_000
-
-    # Longitudinal decision
     self.long_mode = LongMode.COAST
     self.accel = 0.0
-    self.cam_brake = False
-    self.cam_brake_honor = False
-    self.cam_hard_brake = False  # the camera brakes harder than OP's limit: its FSM3/FSM4 go out unchanged
-
-    # Brake acks to the camera
-    self.spoof_cam_ack = False
-    self.cam_brake_target = 0
-    self.cam_mask_frames = 0
-    self.brake_level = 0
+    self.own = False  # OP owns the ECM with the camera's templates, the camera shown ACC standby
+    self.exit_standby_frames = 0  # OP's long ended with the ECM still engaged: camera still shown standby
+    self.tpl_fsm0: dict[int, dict] = {}  # camera's clean frames: FSM0 by Byte_0, FSM3 data/type, FSM4
+    self.tpl_fsm3: dict[str, dict] = {}
+    self.tpl_fsm4: dict | None = None
     self.brake_hold_b0: int | None = None
-
-    self.full_stop = FullStop()  # OP's stop to 0 (lead, red light, stop sign)
+    # OP's stop to 0 (lead, red light, stop sign), as the camera's (route 807)
+    self.driver_gas = False  # driver on the gas: OP's long off, the ECM kept engaged with no accel nor brake
+    self.stopped_frames = 0
+    self.car_hold_frames = 0
+    self.stopping = False  # FSM4 b1 F9
+    self.holding = False  # the car holds the stop: brake request released
+    self.standstill = False  # FSM3 ACC_Standstill to the ECM, and the cruise standstill carstate reports
+    self.driving_off = False  # resume sent, standstill released
+    self.drive_off_request = False  # set with the resume burst, taken on the next frame
+    self.drive_off_frames = 0
+    self.drive_off_moved = False
 
   def update(self, CC, CC_SP, CS, now_nanos):
     actuators = CC.actuators
     can_sends = []
 
-    if CC.cruiseControl.cancel and CS.out.vEgo > CCP.MIN_STEER_SPEED and not CS.out.brakePressed:
-      can_sends.append(volvocan.create_button_msg(self.packer_pt, cancel=True))
+    if CC.cruiseControl.cancel and CS.out.vEgo > CarControllerParams.MIN_STEER_SPEED and not CS.out.brakePressed:
+      can_sends.append(create_button_msg(self.packer, cancel=True))
 
     if self.frame % 2 == 0:
-      can_sends += self.lateral(CC, CS)
+      can_sends += self._lateral(CC, CS)
 
-    self.full_stop.update(CC, CS)
-    self.update_downhill(CC, CS)
-    # Carstate takes the ACC standstill from OP during the stop
-    CS.full_stop_active = self.full_stop.active
-    CS.full_stop_standstill = self.full_stop.standstill
-    self.resume_buttons(CC, CS, can_sends)
-    self.relay_fsm0(CS, can_sends, CS.ecm_acc_engaged)
+    self._ownership(CC, CS)
+    # Carstate takes the ACC standstill from OP while it owns the ECM
+    CS.op_owns_ecm = self.own
+    CS.op_standstill = self.standstill
+    self._resume_buttons(CC, CS, can_sends)
+    for stock_fsm0 in CS.stock_FSM0_frames:
+      can_sends.append(create_fsm0(self.packer, self._fsm0(stock_fsm0, CC.hudControl.leadVisible), CS.ecm_acc_engaged))
 
     if now_nanos >= self.next_long_tx_nanos:
-      next_tx = self.next_long_tx_nanos + self.LONG_TX_PERIOD_NANOS
+      period = int(CarControllerParams.LONG_TX_PERIOD * 1e9)
+      next_tx = self.next_long_tx_nanos + period
       if self.next_long_tx_nanos == 0 or next_tx <= now_nanos:
-        next_tx = now_nanos + self.LONG_TX_PERIOD_NANOS
+        next_tx = now_nanos + period
       self.next_long_tx_nanos = next_tx
-      can_sends += self.longitudinal(CC, CS)
+      can_sends += self._longitudinal(CC, CS)
 
-    can_sends += self.relay_fsm4(CC, CS)
-    can_sends += self.relay_brake_acks(CC, CS)
+    can_sends += self._relay_fsm4(CS)
+    can_sends += self._relay_to_camera(CS)
 
-    if self.frame % 100 == 0 and self._params is not None:
-      self._custom_acc_step = max(1, int(self._params.get("CustomAccShortPressIncrement", return_default=True) or 1))
+    if self.frame % 100 == 0:
+      self._custom_acc_step = self._read_acc_step()
     CS._custom_acc_step = self._custom_acc_step
 
-    icbm_sends = IntelligentCruiseButtonManagementInterface.update(self, CC_SP, CS, self.packer_pt, self.frame, self.last_button_frame)
+    icbm_sends = IntelligentCruiseButtonManagementInterface.update(self, CC_SP, CS, self.packer, self.frame, self.last_button_frame)
     if icbm_sends:
       CS._pending_delta = 0
       CS._icbm_suppress_frames = 25
@@ -123,10 +123,14 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.frame += 1
     return new_actuators, can_sends
 
-  # ---- Lateral ----
+  def _read_acc_step(self) -> int:
+    if self._params is None:
+      return 1
+    return max(1, int(self._params.get("CustomAccShortPressIncrement", return_default=True) or 1))
 
-  def lateral(self, CC, CS):
-    """FSM2 steering request and PSCM1 to the camera."""
+  def _lateral(self, CC, CS):
+    """FSM2 steering request and PSCM1 servo state to the camera, 50 Hz."""
+    CCP = CarControllerParams
     actuators = CC.actuators
     if CC.latActive and CS.out.vEgo > CCP.MIN_STEER_SPEED:
       apply_steer = apply_std_steer_angle_limits(
@@ -165,38 +169,37 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.latActive_prev = CC.latActive
 
     return [
-      volvocan.create_lka_msg(self.packer_pt, apply_steer, int(apply_steer_dir)),
+      create_lka_msg(self.packer, apply_steer, int(apply_steer_dir)),
       # Servo state to the camera
-      volvocan.create_lkas_state_msg(self.packer_pt, CS.out.steeringAngleDeg, CS.pscm_stock_values),
+      create_lkas_state_msg(self.packer, CS.out.steeringAngleDeg, CS.pscm_stock_values),
     ]
 
-  # ---- Buttons ----
-
-  def resume_buttons(self, CC, CS, can_sends):
+  def _resume_buttons(self, CC, CS, can_sends):
     """Resume burst when the lead moves away."""
+    CCP = CarControllerParams
     at_standstill = CS.out.cruiseState.enabled and CS.out.cruiseState.standstill and CS.out.vEgo < 0.01
 
-    # OP's resume request, held for SNG_OP_RESUME_TIME
     self.op_resume_frames = self.op_resume_frames + 1 if CC.cruiseControl.resume else 0
     op_resume = self.op_resume_frames * DT_CTRL >= CCP.SNG_OP_RESUME_TIME
 
-    if (self.frame - self.last_resume_frame) * DT_CTRL > 1.00:
+    if (self.frame - self.last_resume_frame) * DT_CTRL > CCP.RESUME_BURST_INTERVAL:
       if at_standstill and not self.waiting:
         self.distance = CS.acc_distance
         self.waiting = True
         self.sng_count = 0
       # In OP's stop only the planner's resume drives off (as Ford/Toyota), not the camera's distance jitter (route 884)
-      lead_moved = CS.acc_distance > self.distance and not self.full_stop.active
+      lead_moved = CS.acc_distance > self.distance and not self.own
       # The driver's Resume also drives off OP's stop: the ECM takes it, but held in standstill it stays (route 8ab, 436 s)
-      driver_resume = CS.driver_resume and self.full_stop.active
-      drive_off = lead_moved or op_resume or driver_resume or self.full_stop.driver_gas
-      if at_standstill and self.waiting and drive_off and self.full_stop.drive_off_ready(CS):
+      driver_resume = CS.driver_resume and self.own
+      drive_off = lead_moved or op_resume or driver_resume or self.driver_gas
+      # The ECM takes the driver's Resume at once, so OP follows it without waiting for its ready (route 38, 42 s)
+      if at_standstill and self.waiting and drive_off and (driver_resume or self._drive_off_ready(CS)):
         self.resume_hold_frames = CCP.RESUME_HOLD_FRAMES
         if self.sng_count == 0:
-          self.sng_ack_frames = 25
+          self.sng_ack_frames = round(CCP.SNG_ACK_TIME / CCP.LONG_TX_PERIOD)  # counted down per FSM3
         self.sng_count += 1
-        self.full_stop.drive_off_request = self.full_stop.active
-      if self.waiting and (self.sng_count >= 5 or not CS.out.cruiseState.standstill):
+        self.drive_off_request = self.own
+      if self.waiting and (self.sng_count >= CCP.RESUME_BURST_MAX or not CS.out.cruiseState.standstill):
         self.waiting = False
         self.last_resume_frame = self.frame
 
@@ -204,200 +207,199 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if CS.stock_CCButtons_frames:
       self.last_ccbuttons = CS.stock_CCButtons_frames[-1]
     if self.resume_hold_frames > 0 and self.last_ccbuttons is not None:
-      can_sends.append(volvocan.create_resume_button(self.packer_pt, self.last_ccbuttons))
+      can_sends.append(create_resume_button(self.packer, self.last_ccbuttons))
     self.resume_hold_frames = max(self.resume_hold_frames - 1, 0)
 
-  def update_downhill(self, CC, CS):
-    """Downhill from the calibrated pitch, with hysteresis: carstate reports the set speed + offset then."""
-    pitch = math.degrees(CC.orientationNED[1]) if len(CC.orientationNED) == 3 else 0.
-    past = pitch > CCP.DOWNHILL_EXIT_PITCH if self.downhill else pitch < CCP.DOWNHILL_ENTER_PITCH
-    self.downhill_frames = self.downhill_frames + 1 if past else 0
-    hold_time = CCP.DOWNHILL_EXIT_TIME if self.downhill else CCP.DOWNHILL_ENTER_TIME
-    if self.downhill_frames * DT_CTRL >= hold_time:
-      self.downhill = not self.downhill
-      self.downhill_frames = 0
-    CS.downhill = self.downhill
+  # ---- OP owning the ECM ----
 
-  # ---- Camera -> ECM relays ----
+  def _ownership(self, CC, CS):
+    """Templates, and when OP takes and gives back the ECM."""
+    CCP = CarControllerParams
+    clean = cam_clean(CS)
+    if CS.ecm_acc_engaged and clean and not self.own:
+      for f in CS.stock_FSM0_frames:
+        self.tpl_fsm0[int(f["Byte_0"])] = f
+      # ACC_Check is the camera's instant ack: kept out of the template, the ECM braked in the drive-off (routes 8a2, 8a3)
+      self.tpl_fsm3["data" if int(CS.stock_FSM3["FrameKind"]) == 0x81 else "type"] = {**CS.stock_FSM3, "ACC_Check": 0}
+      if CS.stock_FSM4_frames:
+        self.tpl_fsm4 = CS.stock_FSM4_frames[-1]
+    have_templates = self.tpl_fsm0 and len(self.tpl_fsm3) == 2 and self.tpl_fsm4 is not None
 
-  def relay_fsm0(self, CS, can_sends, ecm_engaged):
-    """FSM0 relayed, never ACC enabled without the ECM."""
-    for stock_fsm0 in CS.stock_FSM0_frames:
-      can_sends.append(volvocan.create_fsm0(self.packer_pt, self.full_stop.fsm0(stock_fsm0), ecm_engaged))
+    # Driver's gas keeps OP owning (the panda keeps the camera off the ECM) until OP's long is back (route 518bf777|6e)
+    self.driver_gas = self.own and CC.enabled and (CS.out.gasPressed or (self.driver_gas and not CC.longActive))
+    # Ended by the driver with the ECM still engaged: the camera kept in standby until the ECM drops (route 896)
+    if self.exit_standby_frames > 0:
+      done = not CS.ecm_acc_engaged or self.exit_standby_frames * DT_CTRL >= CCP.EXIT_STANDBY_MAX
+      self.exit_standby_frames = 0 if (done or self.own) else self.exit_standby_frames + 1
+    if not (CC.longActive or self.driver_gas):
+      if self.own and CS.ecm_acc_engaged:
+        self.exit_standby_frames = 1
+      self._release()
+    elif not self.own and have_templates and clean:
+      self.own = True
+      if CS.out.standstill:
+        # Engaged at a stop: in standstill at once, as the camera, or the car keeps holding (route 38, 40 s)
+        self.stopping = self.standstill = True
+        self.stopped_frames = int(CCP.STANDSTILL_DELAY / DT_CTRL)
 
-  def relay_fsm4(self, CC, CS):
-    """FSM4 relayed; OP sets brake flag and target."""
-    sends = []
-    fsm4_mode = self.long_mode if (CC.longActive and not self.cam_hard_brake) else None
-    for stock_fsm4 in CS.stock_FSM4_frames:
-      self.cam_brake = bool(stock_fsm4["ACC_BrakeRequest"])
-      mode = fsm4_mode
-      if self.full_stop.active:
-        stock_fsm4, op_mode = self.full_stop.fsm4(stock_fsm4)
-        mode = mode if op_mode else None
-      sends.append(volvocan.create_fsm4(self.packer_pt, stock_fsm4, self.accel, mode))
-    return sends
+    if self.own:
+      self._update_stop(CC, CS)
+    self.drive_off_request = False
+
+  def _release(self):
+    self.own = self.driving_off = self.driver_gas = False
+    self.standstill = self.stopping = self.holding = False
+    self.stopped_frames = self.car_hold_frames = 0
+
+  def _update_stop(self, CC, CS):
+    """Stopping, the car's hold, standstill and the drive-off, as the camera does them."""
+    CCP = CarControllerParams
+    standstill = CS.out.standstill
+    self.stopped_frames = self.stopped_frames + 1 if standstill else 0
+
+    # The driver's gas drives off as OP's resume does
+    self.drive_off_request |= self.driver_gas and not self.driving_off
+    if self.drive_off_request:
+      self.driving_off, self.drive_off_frames, self.drive_off_moved = True, 0, False
+    if self.driving_off:
+      # Stopped again (or never moved): standstill sequence again, resume retried
+      self.drive_off_frames += 1
+      self.drive_off_moved |= not standstill
+      if standstill and self.drive_off_moved:
+        self.driving_off = False
+        self.stopped_frames = 1
+      elif standstill and self.drive_off_frames * DT_CTRL > CCP.GO_RETRY_TIME:
+        # Never moved: straight back to standstill, so the resume burst goes again
+        self.driving_off = False
+        self.stopping = True
+        self.stopped_frames = int(CCP.STANDSTILL_DELAY / DT_CTRL)
+
+    # Latched until the resume only once in standstill; before it OP drives off on traction, as the camera (route 807)
+    at_stop = not self.driving_off and standstill and (self.standstill or CS.ecm_standstill_ready)
+    stopping = not self.driving_off and ((CS.out.vEgo < CCP.STOPPING_FLAG_SPEED and CC.actuators.accel <= 0.) or
+                                              (at_stop and (self.stopping or CS.car_hold)))
+    self.car_hold_frames = self.car_hold_frames + 1 if (stopping and standstill and CS.car_hold) else 0
+    self.stopping = stopping
+    # Held until OP asks to drive after the resume, so no brake pulse at the start
+    self.holding = not self.driver_gas and (
+      self.car_hold_frames > CCP.HOLD_RELEASE_FRAMES or
+      (self.holding and self.driving_off and standstill and CC.actuators.accel <= 0.))
+    self.standstill = stopping and self.stopped_frames * DT_CTRL >= CCP.STANDSTILL_DELAY
+
+  def _drive_off_ready(self, CS) -> bool:
+    """The resume burst may go: the ECM ready to drive off from its standstill (or it never said so in time)."""
+    if not self.own or CS.ecm_standstill_ready:
+      return True
+    CCP = CarControllerParams
+    return self.stopped_frames * DT_CTRL >= CCP.STANDSTILL_DELAY + CCP.ECM_READY_TIMEOUT
+
+  def _fsm0(self, stock_fsm0, lead: bool):
+    """FSM0 to the ECM: the camera's, or its template while OP owns the ECM (its standby kept from the ECM)."""
+    if not self.own:
+      return stock_fsm0
+    tpl = self.tpl_fsm0.get(int(stock_fsm0["Byte_0"]), next(iter(self.tpl_fsm0.values())))
+    # Lead icon from OP's lead, not the template's frozen one, which flickered between keys (route 37, seg 3)
+    return {**tpl, "ACC_FrontCar": int(lead)}
 
   # ---- Longitudinal ----
 
-  def longitudinal(self, CC, CS):
-    """Accel and mode, FSM1/FSM3 at 50 Hz."""
-    if CS.stock_FSM4_frames:
-      self.cam_brake = bool(CS.stock_FSM4_frames[-1]["ACC_BrakeRequest"])
-    if self.full_stop.driver_gas:
-      # Driver's gas: no accel nor brake from OP, from the first frame the panda sees the pedal
-      accel, long_mode = 0., LongMode.COAST
+  def _longitudinal(self, CC, CS):
+    """FSM1/FSM3 at 50 Hz: OP's accel and mode on the camera's template, or the camera's own frames."""
+    CCP = CarControllerParams
+    if self.own:
+      if self.driver_gas:
+        accel, mode = 0., LongMode.COAST
+      else:
+        accel, mode = self._long_decision(CC, CS)
+      if self.holding:
+        # The car holds the stop: the camera's standstill request (route 807)
+        accel, mode = CCP.HOLD_ACCEL, LongMode.BRAKE
+      elif self.stopping:
+        # Stopping flag on: at least the camera's brake, or it drops to 0 and the car rolls on (route 2e, 59 s)
+        accel, mode = min(accel, CCP.STOPPING_ACCEL), LongMode.BRAKE
+      self.long_mode = mode
+      fsm3 = self.tpl_fsm3["data" if int(CS.stock_FSM3["FrameKind"]) == 0x81 else "type"]
+      standstill = self.standstill
+    elif CS.ecm_acc_engaged:
+      # The camera drives (OP's long off, or its frames not seen yet): its frames as they are, with the resume's ACC_Check
+      accel, mode, standstill = float(CS.stock_FSM3["ACC_AccelerationRequest"]), None, None
       self.long_mode = LongMode.COAST
-      self.cam_brake_honor = False
-    elif CC.longActive:
-      accel, long_mode = self.long_decision(CC, CS)
+      fsm3 = CS.stock_FSM3
     else:
-      accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
+      # ECM off: the panda forwards the camera's FSM1/FSM3, a copy would be duplicated or blocked (route 2c, 837 s)
       self.long_mode = LongMode.COAST
-      self.cam_brake_honor = False
-      long_mode = None
-    if self.full_stop.holding:
-      # The car holds the stop: the camera's standstill request (route 807)
-      accel = CCP.HOLD_ACCEL
-      long_mode = self.long_mode = LongMode.BRAKE
+      return []
     self.accel = accel
-    # The panda only lets the camera's own frames past OP's limit, so they go out unchanged
-    cam_accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
-    self.cam_hard_brake = CC.longActive and self.cam_brake_honor and not self.full_stop.active and cam_accel < CCP.ACCEL_MIN
 
-    # Ack spoofed while OP ignores the camera's brake
-    self.spoof_cam_ack = (CC.longActive and self.cam_brake and not self.cam_brake_honor and
-                          self.long_mode != LongMode.BRAKE and not self.full_stop.active)
-
-    stock_fsm3 = self.full_stop.fsm3(CS)
-    # OP's own frames within the panda's limit, also when following the camera's brake (route 895, 384.3 s)
-    accel = max(accel, CCP.ACCEL_MIN)
     if self.sng_ack_frames > 0:
       acc_check = 1
       self.sng_ack_frames -= 1
     else:
-      acc_check = int(stock_fsm3["ACC_Check"])
-
-    if self.full_stop.active:
-      # OP's mode as is (the template's mode is stale), standstill from OP, camera cancel masked
-      return [
-        volvocan.create_radar(self.packer_pt, CS.stock_FSM1, long_mode),
-        volvocan.create_longitudinal(self.packer_pt, stock_fsm3, accel, acc_check, long_mode, standstill=self.full_stop.standstill),
-      ]
-    if self.cam_hard_brake:
-      return [
-        volvocan.create_radar(self.packer_pt, CS.stock_FSM1),
-        volvocan.create_longitudinal(self.packer_pt, stock_fsm3, cam_accel, int(stock_fsm3["ACC_Check"])),
-      ]
+      acc_check = int(fsm3["ACC_Check"])
     return [
-      volvocan.create_radar(self.packer_pt, CS.stock_FSM1),
-      volvocan.create_longitudinal(self.packer_pt, stock_fsm3, accel, acc_check, self.fsm3_mode(CS, long_mode)),
+      create_radar(self.packer, CS.stock_FSM1, mode),
+      create_longitudinal(self.packer, fsm3, accel, acc_check, mode, standstill=standstill),
     ]
 
-  def long_decision(self, CC, CS):
-    """Accel and mode with OP long active."""
-    actuators = CC.actuators
-    accel = min(max(actuators.accel, CCP.ACCEL_MIN), CCP.ACCEL_MAX)
-    accel = self.jerk_limit(accel, self.accel)
-    cam_accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
-    accel = self.camera_accel_cap(CS, accel, cam_accel)
-    accel = self.camera_brake(accel, cam_accel, cam_brake_leftover(CS))
-    brake_offset = self.slope_brake_offset(CC)
+  def _long_decision(self, CC, CS):
+    """OP's accel within the limits and rate, and its mode."""
+    CCP = CarControllerParams
+    accel = min(max(CC.actuators.accel, CCP.ACCEL_MIN), CCP.ACCEL_MAX)
+    accel = self._jerk_limit(accel, self.accel)
+    brake_offset = self._slope_brake_offset(CC, CS.out.vEgo)
+    return accel, next_long_mode(self.long_mode, accel, brake_offset, CS.out.vEgo)
 
-    if self.cam_brake_honor:
-      self.long_mode = LongMode.BRAKE
-    else:
-      self.long_mode = volvocan.next_long_mode(self.long_mode, accel, brake_offset)
-    return accel, self.long_mode
-
-  def jerk_limit(self, accel, last_accel):
-    """Ramp OP's accel request (jerk limits)."""
-    dt = self.LONG_TX_PERIOD_NANOS * 1e-9
-    down = CCP.JERK_DOWN_LIFT if last_accel > 0. else CCP.JERK_DOWN_BRAKE
-    return min(max(accel, last_accel - down * dt), last_accel + CCP.JERK_UP * dt)
-
-  # ---- Camera rules ----
-
-  def camera_brake(self, accel, cam_accel, leftover=False):
-    """Follow the camera's hard brake, latched until it releases or only its leftover brake state is left."""
-    if not self.cam_brake or leftover:
-      self.cam_brake_honor = False
-    elif cam_accel < CCP.CAMERA_BRAKE_HONOR_BELOW:
-      self.cam_brake_honor = True
-    return min(accel, cam_accel) if self.cam_brake_honor else accel
+  def _jerk_limit(self, accel, last_accel):
+    """Rate limit OP's accel request: braking only against jumps, rising moderate."""
+    CCP = CarControllerParams
+    dt = CCP.LONG_TX_PERIOD
+    return min(max(accel, last_accel - CCP.JERK_DOWN * dt), last_accel + CCP.JERK_UP * dt)
 
   @staticmethod
-  def camera_accel_cap(CS, accel, cam_accel):
-    """No more accel than the camera's while its target is close."""
-    close = max(CS.out.vEgo * CCP.CAMERA_ACCEL_CAP_GAP, CCP.CAMERA_ACCEL_CAP_MIN_DIST)
-    if CS.acc_distance >= min(close, 255):
-      return accel
-    return min(accel, max(cam_accel, CCP.CAMERA_ACCEL_CAP_FLOOR))
-
-  @staticmethod
-  def fsm3_mode(CS, long_mode):
-    """FSM3 mode: 0 when the camera is in it, else OP's."""
-    if long_mode is not None and CS.cam_fsm3_mode == LongMode.BRAKE and not cam_brake_leftover(CS):
-      return LongMode.BRAKE
-    return long_mode
-
-  @staticmethod
-  def slope_brake_offset(CC):
-    """Slope part of the coast accel from pitch."""
+  def _slope_brake_offset(CC, v_ego=None):
+    """Coast accel from pitch, faded out at low speed where coasting does not slow the car (route 22, 878 s)."""
     if len(CC.orientationNED) != 3:
       return 0.
-    return min(-CCP.COAST_PITCH_GAIN * math.sin(CC.orientationNED[1]), CCP.DOWNHILL_BRAKE_OFFSET_MAX)
+    CCP = CarControllerParams
+    offset = min(-CCP.COAST_PITCH_GAIN * math.sin(CC.orientationNED[1]), CCP.DOWNHILL_BRAKE_OFFSET_MAX)
+    if v_ego is None:
+      return offset
+    lo, hi = CCP.BRAKE_ENTER_BP
+    return offset * min(max((v_ego - lo) / (hi - lo), 0.), 1.)
 
-  # ---- Car -> camera relays ----
-
-  def relay_brake_acks(self, CC, CS):
-    """Brake acks to the camera: masked or spoofed."""
-    full_stop = self.full_stop
-    if self.cam_brake and not full_stop.active:
-      self.cam_mask_frames = 0
-    elif (CC.longActive and self.long_mode == LongMode.BRAKE) or full_stop.active:
-      # OP's stop: the camera never asked, so it never sees the car brake or hold
-      self.cam_mask_frames = CCP.CAM_BRAKE_MASK_HOLD_FRAMES
-    elif self.cam_mask_frames > 0:
-      self.cam_mask_frames -= 1
-    mask = self.cam_mask_frames > 0
-    masked = CCP.CAM_BRAKE_MASK_MSGS
-    mask_brake_level, mask_brake_status, mask_wheelspeed1, mask_brake_req_ack = (
-      mask and msg in masked for msg in ("BrakeLevel", "BrakeStatus", "wheelspeed1", "BrakeReqAck"))
-    spoof_wheelspeed1, spoof_brake_req_ack = (self.spoof_cam_ack and msg in masked for msg in ("wheelspeed1", "BrakeReqAck"))
-    if CS.stock_FSM4_frames:
-      last_fsm4 = CS.stock_FSM4_frames[-1]
-      self.cam_brake_target = int(last_fsm4["ACC_BrakeTarget"])
-    spoof_brake_req_ack = spoof_brake_req_ack and self.cam_brake_target < CCP.CAM_ACK_RELEASE_VALUE
-
-    cam_standby = full_stop.show_cam_standby
-
+  def _relay_fsm4(self, CS):
+    """FSM4 to the ECM: OP's brake on the camera's template, or the camera's own."""
     sends = []
-    for stock_brake_level in CS.stock_BrakeLevel_frames:
-      if not mask_brake_level:
-        self.brake_level = int(stock_brake_level["BrakeLevel"])
-      sends.append(volvocan.create_cam_brake_level(self.packer_pt, stock_brake_level, self.brake_level if mask_brake_level else None))
-    for stock_brake_status in CS.stock_BrakeStatus_frames:
-      sends.append(volvocan.create_cam_brake_status(self.packer_pt, stock_brake_status, mask_brake_status))
-    for stock_wheelspeed1 in CS.stock_wheelspeed1_frames:
-      sends.append(volvocan.create_cam_wheel_status(self.packer_pt, stock_wheelspeed1, mask_wheelspeed1, spoof_wheelspeed1, hide_hold=mask,
-                                                    show_standby=cam_standby))
+    for stock_fsm4 in CS.stock_FSM4_frames:
+      if not self.own:
+        sends.append(create_fsm4(self.packer, stock_fsm4, self.accel))
+        continue
+      # b0 alternates 55/AA as the camera's, b1 F1 -> F9 stopping, no brake but OP's
+      fsm4 = {**self.tpl_fsm4, "Byte_0": stock_fsm4["Byte_0"], "ACC_BrakeRequest": 0, "ACC_Stopping": int(self.stopping),
+              "Byte_5_b7": 1, "ACC_BrakeTarget": fsm4_brake_value(0., False) & 0x3FFF}
+      # The car holds (or the driver's gas): brake request released, like the camera 50 ms after the hold
+      mode = None if (self.holding or self.driver_gas) else self.long_mode
+      sends.append(create_fsm4(self.packer, fsm4, self.accel, mode))
+    return sends
+
+  def _relay_to_camera(self, CS):
+    """Car frames to the camera: with OP owning the ECM, ACC standby, no ACC brake, hold nor engaging button shown."""
+    standby = self.own or self.exit_standby_frames > 0
+    sends = []
+    for stock_wheel_rear in CS.stock_WheelRear_frames:
+      sends.append(create_cam_wheel_status(self.packer, stock_wheel_rear, standby))
     for stock_brake_req_ack in CS.stock_BrakeReqAck_frames:
-      sends.append(volvocan.create_cam_brake_request_ack(self.packer_pt, stock_brake_req_ack, mask_brake_req_ack, spoof_brake_req_ack,
-                                                         hide_hold=mask))
-    # EngineData and 0x325 always relayed (the panda blocks them); ACC standby while the camera is shown it
+      sends.append(create_cam_brake_request_ack(self.packer, stock_brake_req_ack, standby))
     for stock_engine_data in CS.stock_EngineData_frames:
-      sends.append(volvocan.create_cam_engine_data(self.packer_pt, stock_engine_data, cam_standby))
+      sends.append(create_cam_engine_data(self.packer, stock_engine_data, standby))
     for stock_acc_hold in CS.stock_AccHold_frames:
-      sends.append(volvocan.create_cam_acc_hold(self.packer_pt, stock_acc_hold, cam_standby))
-    # CCButtons always relayed (the panda blocks them), with Set held while re-engaging the camera
-    set_plus = full_stop.take_cam_set()
+      sends.append(create_cam_acc_hold(self.packer, stock_acc_hold, standby))
     for stock_ccbuttons in CS.stock_CCButtons_frames:
-      sends.append(volvocan.create_cam_button(self.packer_pt, stock_ccbuttons, set_plus))
-    # 0x1FF b0 held from the stop on, while stopped in OP's stop
-    hold_mask = full_stop.active and CS.out.standstill
+      sends.append(create_cam_button(self.packer, stock_ccbuttons, standby))
+    # 0x1FF b0 held while stopped (its 0x70 -> 0xD0 fires the camera's brake alert)
+    hold_mask = self.own and CS.out.standstill
     for stock_brake_hold in CS.stock_BrakeHold_frames:
       if not hold_mask or self.brake_hold_b0 is None:
         self.brake_hold_b0 = int(stock_brake_hold["Byte_0"])
-      sends.append(volvocan.create_cam_brake_hold(self.packer_pt, stock_brake_hold, self.brake_hold_b0 if hold_mask else None))
+      sends.append(create_cam_brake_hold(self.packer, stock_brake_hold, self.brake_hold_b0 if hold_mask else None))
     return sends

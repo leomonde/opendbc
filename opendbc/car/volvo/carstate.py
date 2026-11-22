@@ -24,13 +24,14 @@ class CarState(CarStateBase):
     self._pending_delta = 0
     self._icbm_suppress_frames = 0
     self._custom_acc_step = 1  # set by carcontroller each frame; default 1 km/h
+    self.driver_onoff = False  # driver's ACC On/Off held (bit set, inverted copy cleared)
     self.driver_resume = False  # driver's Resume held (bit set, inverted copy cleared)
-    # Set by the carcontroller: OP's stop to 0 owns the ACC standstill
-    self.full_stop_active = False
-    self.full_stop_standstill = False
+    # Set by the carcontroller: while OP owns the ECM, the ACC standstill is OP's
+    self.op_owns_ecm = False
+    self.op_standstill = False
     self.lka_state_prev: bool | None = None
-    self.downhill = False  # set by the carcontroller
     self.ecm_standstill_ready = False
+    self.gas_pressed = False
 
   def update(self, can_parsers) -> structs.CarState:
     pt_cp = can_parsers[Bus.pt]
@@ -44,8 +45,9 @@ class CarState(CarStateBase):
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
     ret.standstill = ret.vEgoRaw < 0.1
 
-    # gas pedal
-    ret.gasPressed = pt_cp.vl["AccPedal"]["AccPedal"] >= 10
+    # Gas: 10% to press, under 9% to release, as the panda (route 00000007)
+    self.gas_pressed = pt_cp.vl["AccPedal"]["AccPedal"] >= (9 if self.gas_pressed else 10)
+    ret.gasPressed = self.gas_pressed
 
     # brake pedal
     ret.brakePressed = pt_cp.vl["Brake_Info"]["BrakePedal"] == 2
@@ -62,17 +64,16 @@ class CarState(CarStateBase):
 
     # cruise state
     set_speed = pt_cp.vl["ACC_Speed"]["ACC_Speed"] * CV.KPH_TO_MS
-    # Downhill (from the carcontroller): the planner targets a bit over the set, so OP holds it without fighting it
-    ret.cruiseState.speed = set_speed + (CarControllerParams.DOWNHILL_SET_OFFSET if self.downhill else 0.)
+    ret.cruiseState.speed = set_speed
     # The driver's set, as the car shows it (ICBM compares its target to it)
     ret.cruiseState.speedCluster = set_speed
     ret.cruiseState.available = bool(cam_cp.vl["FSM0"]["ACC_Available"])
     # the ECM is the ACC master
     self.ecm_acc_engaged = int(pt_cp.vl["EngineData"]["ACC_State_ECM"]) == EcmAccState.ENGAGED
     ret.cruiseState.enabled = self.ecm_acc_engaged
-    # Camera standstill hold, gated by the car's standstill; OP's own in its stop to 0
-    if self.full_stop_active:
-      ret.cruiseState.standstill = self.full_stop_standstill and ret.standstill
+    # Camera standstill hold, gated by the car's standstill; OP's own while it owns the ECM
+    if self.op_owns_ecm:
+      ret.cruiseState.standstill = self.op_standstill and ret.standstill
     else:
       ret.cruiseState.standstill = bool(cam_cp.vl["FSM3"]["ACC_Standstill"]) and ret.standstill
     # The car holds the stop (BrakeReqAck b0 bit7, route 807)
@@ -116,7 +117,7 @@ class CarState(CarStateBase):
     ret.rightBlinker = pt_cp.vl["MiscCarInfo"]["TurnSignal"] == 3
 
     # Cruise button events from set speed changes, paused after ICBM presses
-    cruise_kph_now = round(set_speed * CV.MS_TO_KPH)  # the driver's set, not the downhill offset
+    cruise_kph_now = round(set_speed * CV.MS_TO_KPH)
     # Stopped, Set+/- only sets the speed: no accel/decel press, or the planner reads it as "go" (route 8b2, 572 s/591 s)
     if ret.standstill:
       self._pending_delta = 0
@@ -137,6 +138,10 @@ class CarState(CarStateBase):
       button_events.append(structs.CarState.ButtonEvent(pressed=False, type=ButtonType.decelCruise))
       self._pending_delta = min(0, self._pending_delta + step)
 
+    # Driver's On/Off as cancel, so OP disengages before the panda drops permission (route 22, 418.4 s)
+    driver_onoff = bool(pt_cp.vl["CCButtons"]["ACCOnOffBtn"]) and not pt_cp.vl["CCButtons"]["ACCOnOffBtnInv"]
+    button_events.extend(create_button_events(driver_onoff, self.driver_onoff, {True: ButtonType.cancel}))
+    self.driver_onoff = driver_onoff
     driver_resume = bool(pt_cp.vl["CCButtons"]["ACCResumeBtn"]) and not pt_cp.vl["CCButtons"]["ACCResumeBtnInv"]
     button_events.extend(create_button_events(driver_resume, self.driver_resume, {True: ButtonType.resumeCruise}))
     self.driver_resume = driver_resume
@@ -155,14 +160,10 @@ class CarState(CarStateBase):
     self.pscm_stock_values = pt_cp.vl["PSCM1"]
     self.stock_FSM1 = copy.copy(cam_cp.vl["FSM1"])
     self.stock_FSM3 = copy.copy(cam_cp.vl["FSM3"])
-    self.cam_fsm3_mode = int(self.stock_FSM3["ACC_Mode"])  # camera's FSM3 mode (LongMode)
-    self.ACC_Check = cam_cp.vl["FSM3"]["ACC_Check"]
     # All frames this cycle of the relayed messages
     self.stock_FSM0_frames = all_frames(cam_cp, "FSM0")
     self.stock_FSM4_frames = all_frames(cam_cp, "FSM4")
-    self.stock_BrakeLevel_frames = all_frames(pt_cp, "BrakeLevel")
-    self.stock_BrakeStatus_frames = all_frames(pt_cp, "BrakeStatus")
-    self.stock_wheelspeed1_frames = all_frames(pt_cp, "wheelspeed1")
+    self.stock_WheelRear_frames = all_frames(pt_cp, "WheelRear")
     self.stock_BrakeReqAck_frames = all_frames(pt_cp, "BrakeReqAck")
     self.stock_BrakeHold_frames = all_frames(pt_cp, "BrakeHold")
     self.stock_EngineData_frames = all_frames(pt_cp, "EngineData")
@@ -181,7 +182,6 @@ class CarState(CarStateBase):
     pt_messages = [
       ("VehicleSpeed1", 50),
       ("AccPedal", 100),
-      ("BrakePedal", 50),
       ("Brake_Info", 50),
       ("PSCM1", 50),
       ("ACC_Speed", 50),
@@ -191,9 +191,7 @@ class CarState(CarStateBase):
       ("EngineData", 66),
       ("CCButtons", 66),
       ("GearSelector", 66),
-      ("BrakeLevel", 50),
-      ("BrakeStatus", 25),
-      ("wheelspeed1", 50),
+      ("WheelRear", 50),
       ("BrakeReqAck", 50),
       ("BrakeHold", 50),
       ("AccHold", 25),

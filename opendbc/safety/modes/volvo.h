@@ -4,18 +4,18 @@
 
 // Safety-relevant CAN messages for EUCD platform.
 #define VOLVO_EUCD_AccPedal      0x020U  // RX, gas pedal
+#define VOLVO_EUCD_GAS_PRESS     100U    // AccPedal raw (0.1 %)
+#define VOLVO_EUCD_GAS_RELEASE   90U
 #define VOLVO_EUCD_FSM0          0x051U  // TX by OP, camera's relayed; ACC state
 #define VOLVO_EUCD_EngineData    0x12AU  // RX, ECM ACC state; TX by OP to camera
 #define VOLVO_EUCD_VehicleSpeed1 0x148U  // RX, vehicle speed
 #define VOLVO_EUCD_Brake_Info    0x20aU  // RX, driver brake pressed
 #define VOLVO_EUCD_CCButtons     0x127U  // RX, LKA on/off; TX by OP, CC buttons
 #define VOLVO_EUCD_PSCM1         0x246U  // TX by OP to camera, PSCM state
-#define VOLVO_EUCD_BRAKE_LEVEL   0x133U  // TX by OP to camera, brake level
-#define VOLVO_EUCD_BRAKE_ACK     0x323U  // TX by OP to camera, brake applied
-#define VOLVO_EUCD_WHEELSPEED1   0x220U  // TX by OP to camera, rear wheel speeds + brake request active
+#define VOLVO_EUCD_WHEEL_REAR    0x220U  // TX by OP to camera, rear wheel speeds + brake request active
 #define VOLVO_EUCD_BRAKE_REQ_ACK 0x299U  // TX by OP to camera, brake request ack
-#define VOLVO_EUCD_BRAKE_HOLD    0x1FFU  // TX by OP to camera, brake hold state (held in OP's stop)
-#define VOLVO_EUCD_ACC_HOLD      0x325U  // TX by OP to camera, ECM ACC hold state (shown as standby in OP's stop)
+#define VOLVO_EUCD_BRAKE_HOLD    0x1FFU  // TX by OP to camera, brake hold state (held while stopped with OP owning the ECM)
+#define VOLVO_EUCD_ACC_HOLD      0x325U  // TX by OP to camera, ECM ACC hold state (shown as standby while OP owns the ECM)
 #define VOLVO_EUCD_FSM1          0x260U  // TX by OP, ACC radar/distance message (oplong)
 #define VOLVO_EUCD_FSM2          0x262U  // TX by OP, LKA command
 #define VOLVO_EUCD_FSM3          0x270U  // TX by OP, ACC accel request + status
@@ -88,7 +88,8 @@ static void volvo_rx_hook(const CANPacket_t *msg) {
     if (addr == VOLVO_EUCD_AccPedal) {
       // Signal: AccPedal
       unsigned int gas_raw = ((GET_BYTES(msg, 2, 1) & 0x03U) << 8) | GET_BYTES(msg, 3, 1);
-      gas_pressed = gas_raw >= 100U;
+      // 10% to press, under 9% to release, or a held foot flickers it (route 00000007, 273.7 s)
+      gas_pressed = gas_raw >= (gas_pressed ? VOLVO_EUCD_GAS_RELEASE : VOLVO_EUCD_GAS_PRESS);
     }
 
     if (addr == VOLVO_EUCD_CCButtons) {
@@ -204,7 +205,7 @@ static bool volvo_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // EngineData to the camera showing ACC standby with the ECM engaged: OP's stop, it sends the ECM's FSM1/FSM3
+  // EngineData to the camera showing ACC standby with the ECM engaged: OP owns the ECM, it sends the ECM's FSM1/FSM3
   if ((addr == VOLVO_EUCD_EngineData) && (msg->bus == VOLVO_CAM_BUS)) {
     const bool shows_standby = ((GET_BYTES(msg, 4, 1) >> 4) & 0x3U) == 0x2U;
     if (shows_standby && cruise_engaged_prev && controls_allowed) {
@@ -247,7 +248,7 @@ static bool volvo_tx_hook(const CANPacket_t *msg) {
 
 static bool volvo_fwd_hook(int bus_num, int addr) {
   bool block_msg = false;
-  // Camera FSM1/FSM3 blocked while OP controls; on the gas they go to the ECM, except in OP's stop (OP sends no accel)
+  // Camera FSM1/FSM3 blocked while OP controls; on the gas they go to the ECM, except while OP owns it (OP sends no accel)
   const bool op_owns_ecm = volvo_eucd_op_owns_ecm_fresh > 0;
   if (((unsigned int)bus_num == VOLVO_CAM_BUS) && controls_allowed && (!gas_pressed || op_owns_ecm)) {
     if (((unsigned int)addr == VOLVO_EUCD_FSM1) || ((unsigned int)addr == VOLVO_EUCD_FSM3)) {
@@ -271,17 +272,15 @@ static safety_config volvo_init(uint16_t param) {
 
   static const CanMsg VOLVO_EUCD_TX_MSGS[] = {
     {VOLVO_EUCD_CCButtons, VOLVO_MAIN_BUS, 8, .check_relay = false},
-    // relayed by OP with Set to re-engage the camera's ACC; check_relay so the CEM's frame does not pass along with it
+    // relayed by OP, Set/Minus/Resume released while the camera is shown standby; check_relay so the CEM's frame does not pass
     {VOLVO_EUCD_CCButtons, VOLVO_CAM_BUS,  8, .check_relay = true},
     {VOLVO_EUCD_PSCM1,     VOLVO_CAM_BUS,  8, .check_relay = true},   // OP replaces stock steering servo state
     // car -> camera, relayed by OP
-    {VOLVO_EUCD_BRAKE_LEVEL,   VOLVO_CAM_BUS, 8, .check_relay = true},
-    {VOLVO_EUCD_BRAKE_ACK,     VOLVO_CAM_BUS, 8, .check_relay = true},
-    {VOLVO_EUCD_WHEELSPEED1,   VOLVO_CAM_BUS, 8, .check_relay = true},
+    {VOLVO_EUCD_WHEEL_REAR,    VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_BRAKE_REQ_ACK, VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_BRAKE_HOLD,    VOLVO_CAM_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_ACC_HOLD,      VOLVO_CAM_BUS, 8, .check_relay = true},
-    {VOLVO_EUCD_EngineData,    VOLVO_CAM_BUS, 8, .check_relay = true},  // camera sees ACC standby in OP's stop
+    {VOLVO_EUCD_EngineData,    VOLVO_CAM_BUS, 8, .check_relay = true},  // camera sees ACC standby while OP owns the ECM
     {VOLVO_EUCD_FSM2,      VOLVO_MAIN_BUS, 8, .check_relay = true},   // OP replaces stock LKA command
     // FSM1/FSM3: camera's pass through while OP does not control (relay delay faults the ECM)
     {VOLVO_EUCD_FSM1,      VOLVO_MAIN_BUS, 8, .check_relay = false},
